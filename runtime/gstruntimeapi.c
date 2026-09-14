@@ -298,3 +298,9 @@ gst_runtime_rtsp_free (GstRuntimeRtsp *client)
   gst_rtsp_runtime_client_free (client->client);
   g_free (client);
 }
+
+void
+gst_runtime_rtsp_invalidate (GstRuntimeRtsp *client)
+{
+  gst_rtsp_runtime_client_invalidate (client->client);
+}

@@ -520,3 +520,21 @@ gst_rtsp_runtime_client_cseq (GstRTSPRuntimeClient *client)
 {
   return client->cseq;
 }
+
+void
+gst_rtsp_runtime_client_invalidate (GstRTSPRuntimeClient *client)
+{
+  if (!client)
+    return;
+  client->unknown = TRUE;
+  GHashTableIter sessions, tracks;
+  gpointer session, track;
+  g_hash_table_iter_init (&sessions, client->sessions);
+  while (g_hash_table_iter_next (&sessions, NULL, &session))
+    {
+      g_hash_table_iter_init (&tracks, ((RuntimeSession *)session)->tracks);
+      while (g_hash_table_iter_next (&tracks, NULL, &track))
+        ((RuntimeTrack *)track)->state = GST_RTSP_RUNTIME_UNKNOWN;
+    }
+  gst_rtsp_connection_flush (client->connection, TRUE);
+}

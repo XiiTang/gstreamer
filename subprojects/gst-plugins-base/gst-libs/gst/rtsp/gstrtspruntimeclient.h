@@ -75,5 +75,6 @@ int gst_rtsp_runtime_client_send_data_begin (GstRTSPRuntimeClient *client, guint
                                              const guint8 *bytes, gsize length);
 GST_RTSP_API
 gsize gst_rtsp_runtime_client_written_bytes (GstRTSPRuntimeClient *client);
+GST_RTSP_API void gst_rtsp_runtime_client_invalidate (GstRTSPRuntimeClient *client);
 G_END_DECLS
 #endif

@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Version {
@@ -38,6 +39,7 @@ pub struct Message {
     pub headers: Vec<(Vec<u8>, Vec<u8>)>,
     pub body: Vec<u8>,
     pub raw: Vec<u8>,
+    pub authentication: Option<crate::rtsp_auth::Observation>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Address {
@@ -73,6 +75,8 @@ impl Drop for Inner {
 }
 pub struct Rtsp {
     inner: Arc<Inner>,
+    version: Version,
+    authentication: Option<crate::rtsp_auth::Auth>,
     _exclusive: PhantomData<Cell<()>>,
 }
 #[derive(Clone)]
@@ -89,20 +93,20 @@ fn timeout(value: Duration) -> i64 {
     value.as_micros().clamp(1, i64::MAX as u128) as i64
 }
 struct Headers {
-    _strings: Vec<(CString, CString)>,
+    _strings: Vec<(CString, Zeroizing<Vec<u8>>)>,
     values: Vec<ffi::Header>,
 }
 impl Headers {
     fn new(values: &[(&str, &str)]) -> Result<Self, Error> {
         let strings = values
             .iter()
-            .map(|(k, v)| Ok((text(k)?, text(v)?)))
+            .map(|(k, v)| Ok((text(k)?, Zeroizing::new(text(v)?.into_bytes_with_nul()))))
             .collect::<Result<Vec<_>, Error>>()?;
         let values = strings
             .iter()
             .map(|(k, v)| ffi::Header {
                 name: k.as_ptr(),
-                value: v.as_ptr(),
+                value: v.as_ptr().cast(),
             })
             .collect();
         Ok(Self {
@@ -143,6 +147,8 @@ impl Rtsp {
         Error::check(result)?;
         Ok(Self {
             inner: Arc::new(Inner(NonNull::new(output).ok_or(Error::INVALID)?)),
+            version,
+            authentication: None,
             _exclusive: PhantomData,
         })
     }
@@ -178,8 +184,101 @@ impl Rtsp {
         Error::check(result)?;
         Ok(Self {
             inner: Arc::new(Inner(NonNull::new(output).ok_or(Error::INVALID)?)),
+            version,
+            authentication: None,
             _exclusive: PhantomData,
         })
+    }
+    pub fn configure_authentication(
+        &mut self,
+        username: Zeroizing<String>,
+        password: Zeroizing<String>,
+        policy: crate::rtsp_auth::Policy,
+        tls: bool,
+    ) -> Result<(), Error> {
+        if self.authentication.is_some() {
+            return Err(Error::AUTHENTICATION);
+        }
+        self.authentication = Some(crate::rtsp_auth::Auth::new(
+            username,
+            password,
+            policy,
+            tls || matches!(self.version, Version::V1),
+        )?);
+        Ok(())
+    }
+    pub fn request_authenticated_begin(
+        &mut self,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        challenge: &str,
+        qop: crate::rtsp_auth::Qop,
+    ) -> (Result<bool, Error>, Dispatch) {
+        let prepared = match self
+            .authentication
+            .as_mut()
+            .ok_or(Error::AUTHENTICATION)
+            .and_then(|auth| auth.prepare(challenge, qop, method, uri, body))
+        {
+            Ok(prepared) => prepared,
+            Err(error) => return (Err(error), Dispatch::default()),
+        };
+        let mut headers = headers.to_vec();
+        headers.push(("Authorization", &prepared.header));
+        let result = self.request_begin(method, uri, &headers, body);
+        if matches!(result.0, Ok(true)) {
+            self.authentication.as_mut().unwrap().dispatched(prepared);
+        }
+        result
+    }
+    fn authenticate_received(
+        &mut self,
+        valid: bool,
+        complete: bool,
+        message: &mut Message,
+    ) -> Result<(), Error> {
+        let Some(auth) = self.authentication.as_mut() else {
+            return Ok(());
+        };
+        if !valid {
+            message.raw.zeroize();
+            message.raw.clear();
+            for (name, value) in &mut message.headers {
+                if name.eq_ignore_ascii_case(b"www-authenticate")
+                    || name.eq_ignore_ascii_case(b"authentication-info")
+                    || name.eq_ignore_ascii_case(b"proxy-authenticate")
+                    || name.eq_ignore_ascii_case(b"proxy-authentication-info")
+                {
+                    value.zeroize();
+                    value.clear();
+                }
+            }
+            message.authentication = Some(crate::rtsp_auth::Observation {
+                protected_headers: true,
+                ..Default::default()
+            });
+        } else if complete && message.kind == 2 {
+            match auth.response(
+                message.status,
+                &mut message.headers,
+                &message.body,
+                &mut message.raw,
+            ) {
+                Ok(observation) => message.authentication = Some(observation),
+                Err(error) => {
+                    message.authentication = Some(crate::rtsp_auth::Observation {
+                        protected_headers: true,
+                        server_proof: Some(false),
+                        ..Default::default()
+                    });
+                    unsafe { ffi::gst_runtime_rtsp_invalidate(self.inner.0.as_ptr()) };
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
     }
     pub fn cancellation(&self) -> Cancellation {
         Cancellation(self.inner.clone())
@@ -354,7 +453,11 @@ impl Rtsp {
         });
         // The native ABI always owns a result message, including failed reads.
         let message = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
-        (result, message.copy())
+        let mut message = message.copy();
+        let result = self
+            .authenticate_received(result.is_ok(), true, &mut message)
+            .and(result);
+        (result, message)
     }
     /// False means a retained partial message. No partial event is published;
     /// the next complete message or terminal error includes its exact raw bytes.
@@ -368,7 +471,11 @@ impl Rtsp {
             Error::check(code).map(|_| true)
         };
         let message = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
-        (result, message.copy())
+        let mut message = message.copy();
+        let result = self
+            .authenticate_received(result.is_ok(), matches!(result, Ok(true)), &mut message)
+            .and(result);
+        (result, message)
     }
     pub fn transport(&mut self, session: &str, uri: &str) -> Result<Option<Transport>, Error> {
         let session = text(session)?;
@@ -539,6 +646,7 @@ impl NativeMessage {
             headers,
             body: bytes(view.body, view.body_length),
             raw: bytes(view.raw, view.raw_length),
+            authentication: None,
         }
     }
 }

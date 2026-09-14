@@ -46,6 +46,7 @@ pub struct TransportView {
     pub generation: u64,
 }
 unsafe extern "C" {
+    pub fn gst_runtime_rtsp_invalidate(client: *mut c_void);
     pub fn gst_runtime_initialize();
     pub fn gst_runtime_rtsp_request_begin(
         client: *mut c_void,

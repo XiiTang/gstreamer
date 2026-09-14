@@ -15,3 +15,8 @@ unsafe_op_in_unsafe_fn = "deny"
 [build-dependencies]
 serde_json = "1.0"
 sha2 = "0.10"
+
+[dependencies]
+http-auth = { git = "https://github.com/XiiTang/http-auth", rev = "428c056d7e1781888945731d35e17e87bcfa5a86" }
+zeroize = "1.8"
+uuid = { version = "1", features = ["v4"] }

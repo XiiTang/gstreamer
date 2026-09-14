@@ -65,6 +65,13 @@ typedef struct _RTSPKeyValue
   gchar *value;
   gchar *custom_key;            /* custom header string (field is INVALID then) */
 } RTSPKeyValue;
+static void
+runtime_header_value_free(gchar *value)
+{
+  if (value) {gsize length=strlen(value); volatile guint8 *p=(volatile guint8 *)value; while(length--) *p++=0;}
+  g_free(value);
+}
+
 
 gboolean
 gst_rtsp_message_header_at (const GstRTSPMessage *msg, guint index,
@@ -513,7 +520,7 @@ gst_rtsp_message_unset (GstRTSPMessage * msg)
     for (i = 0; i < msg->hdr_fields->len; i++) {
       RTSPKeyValue *keyval = &g_array_index (msg->hdr_fields, RTSPKeyValue, i);
 
-      g_free (keyval->value);
+      runtime_header_value_free (keyval->value);
       g_free (keyval->custom_key);
     }
     g_array_free (msg->hdr_fields, TRUE);
@@ -684,7 +691,7 @@ gst_rtsp_message_remove_header (GstRTSPMessage * msg, GstRTSPHeaderField field,
     RTSPKeyValue *key_value = &g_array_index (msg->hdr_fields, RTSPKeyValue, i);
 
     if (key_value->field == field && (indx == -1 || cnt++ == indx)) {
-      g_free (key_value->value);
+      runtime_header_value_free (key_value->value);
       g_array_remove_index (msg->hdr_fields, i);
       res = GST_RTSP_OK;
       if (indx != -1)
@@ -864,7 +871,7 @@ gst_rtsp_message_remove_header_by_name (GstRTSPMessage * msg,
       break;
 
     kv = &g_array_index (msg->hdr_fields, RTSPKeyValue, pos);
-    g_free (kv->value);
+    runtime_header_value_free (kv->value);
     g_free (kv->custom_key);
     g_array_remove_index (msg->hdr_fields, pos);
     res = GST_RTSP_OK;
