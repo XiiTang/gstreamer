@@ -53,6 +53,12 @@ parsing and native debug dumps are disabled. Native dependencies must still be
 bundled and relocated by platform packaging; the gst-full artifact alone is not
 a self-contained distribution.
 
+The build takes GLib, libffi, PCRE2 and proxy-libintl from this commit's hashed
+Meson wraps, compiling them into gst-full instead of loading developer-installed
+base libraries. macOS compilation targets 13.0. OpenSSL and the pinned libSRTP
+artifact are explicit private prefixes; platform packaging verifies their actual
+architecture and minimum OS before relocating and signing the complete closure.
+
 `tests/full_native.py` links the actual private artifact and tests RTSP, all seven
 payload formats, raw RTP, backpressure and joined stop. FFmpeg independently
 encodes the fixtures and decodes recovered H264/H265/JPEG for exact pixel checks.

@@ -4,7 +4,7 @@ The private gst-full build has no filesystem plugin registry, dynamic plugin
 scan, command-line pipeline parser, tracers, or GStreamer debug/key dumps.
 External media I/O enters through the Runtime's appsrc/appsink/socket bridge.
 """
-import argparse, hashlib, json, os, pathlib, subprocess, shutil
+import argparse, hashlib, json, os, pathlib, subprocess, shutil, sys
 p=argparse.ArgumentParser()
 p.add_argument('--meson',required=True)
 p.add_argument('--build',type=pathlib.Path,required=True)
@@ -26,10 +26,14 @@ for filename,digest in srtp_manifest['artifacts'].items():
   raise SystemExit('The SRTP artifact changed after its build')
 a.dependency_prefix.insert(0,a.srtp_prefix)
 env=dict(os.environ)
+if sys.platform == 'darwin':
+ env['MACOSX_DEPLOYMENT_TARGET']='13.0'
 env['PATH']=str(pathlib.Path(a.meson).resolve().parent)+os.pathsep+env.get('PATH','')
 if a.dependency_prefix:
  env['PKG_CONFIG_PATH']=os.pathsep.join(str(path/'lib/pkgconfig') for path in a.dependency_prefix)
 options=['-Dpkg_config_path='+','.join(str(path/'lib/pkgconfig') for path in a.dependency_prefix),'--buildtype=release','--default-library=static','-Dauto_features=disabled',
+ '--force-fallback-for=glib,libffi,libpcre2-8,intl',
+ '-Dglib:tests=false','-Dglib:nls=disabled','-Dglib:glib_debug=disabled',
  '-Dbase=enabled','-Dgood=enabled','-Dbad=enabled','-Dugly=disabled','-Dlibav=disabled',
  '-Ddevtools=disabled','-Dges=disabled','-Drtsp_server=disabled','-Dorc=disabled',
  '-Dintrospection=disabled','-Dtests=disabled','-Dexamples=disabled','-Ddoc=disabled',
