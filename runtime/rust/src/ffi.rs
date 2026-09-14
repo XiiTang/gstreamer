@@ -19,8 +19,39 @@ pub struct MessageView {
     pub body_length: usize,
     pub raw_length: usize,
 }
+#[repr(C)]
+#[derive(Default)]
+pub struct TransportView {
+    pub profile: i32,
+    pub lower_transport: i32,
+    pub mode_play: i32,
+    pub mode_record: i32,
+    pub rtcp_mux: i32,
+    pub interleaved_first: i32,
+    pub interleaved_last: i32,
+    pub client_first: i32,
+    pub client_last: i32,
+    pub server_first: i32,
+    pub server_last: i32,
+    pub source: *const c_char,
+    pub destination: *const c_char,
+    pub src_host: [*const c_char; 2],
+    pub dest_host: [*const c_char; 2],
+    pub src_port: [u32; 2],
+    pub dest_port: [u32; 2],
+    pub src_count: u32,
+    pub dest_count: u32,
+    pub ssrc_count: u32,
+    pub ssrcs: *const u32,
+}
 unsafe extern "C" {
     pub fn gst_runtime_initialize();
+    pub fn gst_runtime_rtsp_transport(
+        client: *mut c_void,
+        session: *const c_char,
+        uri: *const c_char,
+        view: *mut TransportView,
+    ) -> c_int;
     pub fn gst_runtime_rtsp_new(
         uri: *const c_char,
         fd: c_int,

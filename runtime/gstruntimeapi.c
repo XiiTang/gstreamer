@@ -188,6 +188,46 @@ gst_runtime_rtsp_state (GstRuntimeRtsp *client, const char *session, const char 
   return gst_rtsp_runtime_client_track_state (client->client, session, uri, &state) ? (int)state
                                                                                     : -1;
 }
+int
+gst_runtime_rtsp_transport (GstRuntimeRtsp *client, const char *session, const char *uri,
+                            GstRuntimeRtspTransportView *view)
+{
+  if (!client || !session || !uri || !view)
+    return GST_RTSP_EINVAL;
+  memset (view, 0, sizeof (*view));
+  const GstRTSPTransport *transport
+      = gst_rtsp_runtime_client_track_transport (client->client, session, uri);
+  if (!transport)
+    return 1;
+  view->profile = transport->profile;
+  view->lower_transport = transport->lower_transport;
+  view->mode_play = transport->mode_play;
+  view->mode_record = transport->mode_record;
+  view->rtcp_mux = transport->rtcp_mux;
+  view->interleaved_first = transport->interleaved.min;
+  view->interleaved_last = transport->interleaved.max;
+  view->client_first = transport->client_port.min;
+  view->client_last = transport->client_port.max;
+  view->server_first = transport->server_port.min;
+  view->server_last = transport->server_port.max;
+  view->source = transport->source;
+  view->destination = transport->destination;
+  view->src_count = transport->src_addr_count;
+  view->dest_count = transport->dest_addr_count;
+  for (guint i = 0; i < 2; i++)
+    {
+      view->src_host[i] = transport->src_addr[i].host;
+      view->src_port[i] = transport->src_addr[i].port;
+      view->dest_host[i] = transport->dest_addr[i].host;
+      view->dest_port[i] = transport->dest_addr[i].port;
+    }
+  if (transport->ssrcs)
+    {
+      view->ssrc_count = transport->ssrcs->len;
+      view->ssrcs = (const guint32 *)transport->ssrcs->data;
+    }
+  return 0;
+}
 void
 gst_runtime_rtsp_cancel (GstRuntimeRtsp *client)
 {

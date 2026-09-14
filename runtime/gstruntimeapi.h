@@ -17,6 +17,21 @@ typedef struct
   const guint8 *body, *raw;
   gsize body_length, raw_length;
 } GstRuntimeRtspMessageView;
+typedef struct
+{
+  int profile, lower_transport, mode_play, mode_record, rtcp_mux;
+  int interleaved_first, interleaved_last;
+  int client_first, client_last, server_first, server_last;
+  const char *source, *destination;
+  const char *src_host[2], *dest_host[2];
+  guint32 src_port[2], dest_port[2];
+  guint32 src_count, dest_count, ssrc_count;
+  const guint32 *ssrcs;
+} GstRuntimeRtspTransportView;
+/* View pointers are borrowed until the next serialized client operation. */
+GST_API
+int gst_runtime_rtsp_transport (GstRuntimeRtsp *client, const char *session, const char *uri,
+                                GstRuntimeRtspTransportView *view);
 GST_API
 void gst_runtime_initialize (void);
 /* Takes ownership of fd after g_socket_new_from_fd succeeds. The Rust owner

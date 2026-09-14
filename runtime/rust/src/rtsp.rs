@@ -39,6 +39,27 @@ pub struct Message {
     pub body: Vec<u8>,
     pub raw: Vec<u8>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Address {
+    pub host: String,
+    pub port: u16,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transport {
+    pub profile: &'static str,
+    pub lower_transport: &'static str,
+    pub play: bool,
+    pub record: bool,
+    pub rtcp_mux: bool,
+    pub interleaved: Option<(u8, Option<u8>)>,
+    pub client_ports: Option<(u16, Option<u16>)>,
+    pub server_ports: Option<(u16, Option<u16>)>,
+    pub source: Option<String>,
+    pub destination: Option<String>,
+    pub source_addresses: Vec<Address>,
+    pub destination_addresses: Vec<Address>,
+    pub ssrcs: Vec<u32>,
+}
 struct Inner(NonNull<c_void>);
 // The native client is movable while quiescent. Only its cancellation function
 // is called through shared handles; all other access requires &mut Rtsp.
@@ -235,6 +256,106 @@ impl Rtsp {
         // The native ABI always owns a result message, including failed reads.
         let message = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
         (result, message.copy())
+    }
+    pub fn transport(&mut self, session: &str, uri: &str) -> Result<Option<Transport>, Error> {
+        let session = text(session)?;
+        let uri = text(uri)?;
+        let mut view = ffi::TransportView::default();
+        let result = unsafe {
+            ffi::gst_runtime_rtsp_transport(
+                self.inner.0.as_ptr(),
+                session.as_ptr(),
+                uri.as_ptr(),
+                &mut view,
+            )
+        };
+        if result == 1 {
+            return Ok(None);
+        }
+        Error::check(result)?;
+        let string = |ptr: *const std::ffi::c_char| -> Result<Option<String>, Error> {
+            if ptr.is_null() {
+                Ok(None)
+            } else {
+                unsafe { CStr::from_ptr(ptr) }
+                    .to_str()
+                    .map(|v| Some(v.to_owned()))
+                    .map_err(|_| Error::INVALID)
+            }
+        };
+        let addresses = |hosts: [*const std::ffi::c_char; 2],
+                         ports: [u32; 2],
+                         count: u32|
+         -> Result<Vec<Address>, Error> {
+            if count > 2 {
+                return Err(Error::INVALID);
+            }
+            (0..count as usize)
+                .map(|i| {
+                    Ok(Address {
+                        host: string(hosts[i])?.ok_or(Error::INVALID)?,
+                        port: u16::try_from(ports[i]).map_err(|_| Error::INVALID)?,
+                    })
+                })
+                .collect()
+        };
+        let range = |first: i32, last: i32| -> Result<Option<(u16, Option<u16>)>, Error> {
+            if first == -1 {
+                return Ok(None);
+            }
+            Ok(Some((
+                u16::try_from(first).map_err(|_| Error::INVALID)?,
+                if last == -1 {
+                    None
+                } else {
+                    Some(u16::try_from(last).map_err(|_| Error::INVALID)?)
+                },
+            )))
+        };
+        let channels = range(view.interleaved_first, view.interleaved_last)?
+            .map(|(a, b)| {
+                Ok((
+                    u8::try_from(a).map_err(|_| Error::INVALID)?,
+                    b.map(u8::try_from)
+                        .transpose()
+                        .map_err(|_| Error::INVALID)?,
+                ))
+            })
+            .transpose()?;
+        let ssrcs = if view.ssrc_count == 0 {
+            Vec::new()
+        } else {
+            if view.ssrcs.is_null() {
+                return Err(Error::INVALID);
+            }
+            unsafe { std::slice::from_raw_parts(view.ssrcs, view.ssrc_count as usize) }.to_vec()
+        };
+        Ok(Some(Transport {
+            profile: match view.profile {
+                1 => "AVP",
+                2 => "SAVP",
+                4 => "AVPF",
+                8 => "SAVPF",
+                _ => return Err(Error::INVALID),
+            },
+            lower_transport: match view.lower_transport {
+                1 => "udp",
+                2 => "multicast",
+                4 => "tcp",
+                _ => return Err(Error::INVALID),
+            },
+            play: view.mode_play != 0,
+            record: view.mode_record != 0,
+            rtcp_mux: view.rtcp_mux != 0,
+            interleaved: channels,
+            client_ports: range(view.client_first, view.client_last)?,
+            server_ports: range(view.server_first, view.server_last)?,
+            source: string(view.source)?,
+            destination: string(view.destination)?,
+            source_addresses: addresses(view.src_host, view.src_port, view.src_count)?,
+            destination_addresses: addresses(view.dest_host, view.dest_port, view.dest_count)?,
+            ssrcs,
+        }))
     }
     pub fn state(&mut self, session: &str, uri: &str) -> Result<Option<TrackState>, Error> {
         let session = text(session)?;
