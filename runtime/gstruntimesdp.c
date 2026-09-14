@@ -191,6 +191,7 @@ fields (GstRuntimeSdp *s, const guint8 *data, gsize length)
   if (g_strv_length (s->lines) > 65536)
     return FALSE;
   int scope = -1, rank = -1;
+  guint metadata = 0;
   gboolean version = FALSE, origin = FALSE, name = FALSE, time = FALSE;
   for (guint i = 0; s->lines[i]; i++)
     {
@@ -237,6 +238,14 @@ fields (GstRuntimeSdp *s, const guint8 *data, gsize length)
         time = TRUE;
       if (!validate_value (type, line + 2))
         return FALSE;
+      if (++metadata > 65536)
+        return FALSE;
+      if (type == 'm')
+        {
+          for (const char *p = line + 2; *p; p++)
+            if (*p == ' ' && ++metadata > 65536)
+              return FALSE;
+        }
       Field f = { scope, type, line + 2 };
       g_array_append_val (s->fields, f);
     }
@@ -263,6 +272,8 @@ gst_runtime_sdp_new (const guint8 *data, gsize length, GstRuntimeSdp **result)
       gst_runtime_sdp_free (s);
       return -2;
     }
+  guint parameter_count = 0;
+  gsize parameter_bytes = 0;
   for (guint i = 0; i < gst_sdp_message_medias_len (s->message); i++)
     {
       const GstSDPMedia *m = gst_sdp_message_get_media (s->message, i);
@@ -283,6 +294,33 @@ gst_runtime_sdp_new (const guint8 *data, gsize length, GstRuntimeSdp **result)
                         gst_structure_set (structure, "encoding-name", G_TYPE_STRING,
                                            info->encoding_name, NULL);
                     }
+                }
+            }
+          if (caps)
+            {
+              const GstStructure *structure = gst_caps_get_structure (caps, 0);
+              guint count = gst_structure_n_fields (structure);
+              if (count > 65536 - parameter_count)
+                {
+                  gst_caps_unref (caps);
+                  gst_runtime_sdp_free (s);
+                  return -2;
+                }
+              parameter_count += count;
+              for (guint k = 0; k < count; k++)
+                {
+                  const char *key = gst_structure_nth_field_name (structure, k);
+                  const GValue *value = gst_structure_get_value (structure, key);
+                  gsize extent = strlen (key) + sizeof (GValue);
+                  if (G_VALUE_HOLDS_STRING (value))
+                    extent += strlen (g_value_get_string (value));
+                  if (extent > 32 * 1024 * 1024 - parameter_bytes)
+                    {
+                      gst_caps_unref (caps);
+                      gst_runtime_sdp_free (s);
+                      return -2;
+                    }
+                  parameter_bytes += extent;
                 }
             }
           g_ptr_array_add (s->formats, caps);
