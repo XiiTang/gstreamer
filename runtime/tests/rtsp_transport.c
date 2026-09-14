@@ -217,6 +217,11 @@ explicit_state (GstRTSPVersion version)
              "Location: rtsp://must-not-connect.invalid/new\r\n");
   operation (client, pair[1], version, GST_RTSP_SETUP, one, NULL, seq++, 200, setup);
   operation (client, pair[1], version, GST_RTSP_SETUP, two, session, seq++, 200, setup);
+  const GstRTSPTransport *negotiated
+      = gst_rtsp_runtime_client_track_transport (client, session, one);
+  g_assert_nonnull (negotiated);
+  g_assert_cmpint (negotiated->interleaved.min, ==, 0);
+  g_assert_cmpint (negotiated->interleaved.max, ==, 1);
   state_is (client, one, GST_RTSP_RUNTIME_READY);
   state_is (client, two, GST_RTSP_RUNTIME_READY);
   operation (client, pair[1], version, GST_RTSP_PLAY, one, session, seq++, 200, NULL);
@@ -261,12 +266,72 @@ explicit_state (GstRTSPVersion version)
   close (pair[1]);
 }
 
+static void
+versioned_transport (void)
+{
+  GstRTSPTransport *t = NULL, *copy = NULL;
+  gst_rtsp_transport_new (&t);
+  gst_rtsp_transport_new (&copy);
+  const gchar *v2 = "RTP/AVP/UDP; unicast;dest_addr=\":8000\"/\"[2001:db8::1]:8001\";"
+                    "src_addr=\"media.example:9000\"/\"media.example:9001\";ssrc=00000000/12345678";
+  g_assert_cmpint (gst_rtsp_transport_parse_version (v2, GST_RTSP_VERSION_2_0, t), ==, GST_RTSP_OK);
+  g_assert_cmpuint (t->dest_addr_count, ==, 2);
+  g_assert_cmpstr (t->dest_addr[0].host, ==, "");
+  g_assert_cmpuint (t->dest_addr[0].port, ==, 8000);
+  g_assert_cmpstr (t->dest_addr[1].host, ==, "2001:db8::1");
+  g_assert_cmpuint (t->src_addr_count, ==, 2);
+  g_assert_cmpstr (t->src_addr[1].host, ==, "media.example");
+  g_assert_cmpuint (t->ssrcs->len, ==, 2);
+  g_assert_cmpuint (g_array_index (t->ssrcs, guint32, 0), ==, 0);
+  gchar *encoded = gst_rtsp_transport_as_text (t);
+  g_assert_nonnull (encoded);
+  g_assert_cmpint (gst_rtsp_transport_parse_version (encoded, GST_RTSP_VERSION_2_0, copy), ==,
+                   GST_RTSP_OK);
+  g_assert_cmpstr (copy->dest_addr[1].host, ==, "2001:db8::1");
+  g_assert_cmpuint (copy->ssrcs->len, ==, 2);
+  g_free (encoded);
+  g_assert_cmpint (gst_rtsp_transport_parse_version (v2, GST_RTSP_VERSION_1_0, t), <, 0);
+  const gchar *v1
+      = "RTP/"
+        "AVP;unicast;client_port=8000-8001;server_port=9000-9001;source=127.0.0.1;mode=\"RECORD\"";
+  g_assert_cmpint (gst_rtsp_transport_parse_version (v1, GST_RTSP_VERSION_1_0, t), ==, GST_RTSP_OK);
+  g_assert_cmpuint (t->server_port.max, ==, 9001);
+  g_assert_cmpint (gst_rtsp_transport_parse_version (v1, GST_RTSP_VERSION_2_0, t), <, 0);
+  const gchar *bad[] = {
+    "RTP/AVP;unicast;dest_addr=\":65536\"",
+    "RTP/AVP;unicast;dest_addr=\":8\"/",
+    "RTP/AVP;unicast;dest_addr=\":8\"/\":9\"/\":10\"",
+    "RTP/AVP;unicast;dest_addr=\"[invalid]:8\"",
+    "RTP/AVP;unicast;dest_addr=\"host:8junk\"",
+    "RTP/AVP;unicast;dest_addr=\"host/path:8\"",
+    "RTP/AVP;unicast;dest_addr=\":8\";dest_addr=\":9\"",
+    "RTP/AVP;unicast;x-required=unimplemented",
+    "RTP/AVP/UDP/extra;unicast",
+    "RTP/AVP;dest_addr=\":8\"",
+    "RTP/AVP;unicast;ssrc=1",
+    "RTP/AVP/TCP;unicast;interleaved=0-1;src_addr=\":9\"",
+    "RTP/AVP/TCP;unicast;interleaved=1-",
+    "RTP/AVP/TCP;unicast;interleaved=2-1",
+    "RTP/AVP/TCP;unicast;interleaved=0-1;mode=\"PLAYBACK\"",
+    "RTP/AVP/TCP;unicast;interleaved=0-1;mode=\"PLAY,BOGUS\"",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (bad); i++)
+    g_assert_cmpint (gst_rtsp_transport_parse_version (bad[i], GST_RTSP_VERSION_2_0, t), <, 0);
+  g_assert_cmpint (
+      gst_rtsp_transport_parse_version ("RTP/AVP;unicast;client_port=no", GST_RTSP_VERSION_1_0, t),
+      <, 0);
+  gst_rtsp_transport_free (t);
+  gst_rtsp_transport_free (copy);
+  g_print ("PASS version-specific native Transport tuples, IPv6, SSRC list and strict rejection\n");
+}
+
 int
 main (int argc, char **argv)
 {
   gst_init (&argc, &argv);
   roundtrip (GST_RTSP_VERSION_1_0, "1.0");
   roundtrip (GST_RTSP_VERSION_2_0, "2.0");
+  versioned_transport ();
   truncated_cancel ();
   malformed ();
   explicit_state (GST_RTSP_VERSION_1_0);

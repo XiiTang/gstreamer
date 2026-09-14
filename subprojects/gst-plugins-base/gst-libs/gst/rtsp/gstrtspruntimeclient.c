@@ -4,6 +4,18 @@
 
 typedef struct
 {
+  GstRTSPRuntimeState state;
+  GstRTSPTransport *transport;
+} RuntimeTrack;
+static void
+track_free (gpointer value)
+{
+  RuntimeTrack *track = value;
+  gst_rtsp_transport_free (track->transport);
+  g_free (track);
+}
+typedef struct
+{
   gchar *aggregate;
   GHashTable *tracks;
 } RuntimeSession;
@@ -50,12 +62,12 @@ transition (GstRTSPRuntimeClient *client, RuntimeSession *session, GstRTSPRuntim
       gpointer key, value;
       g_hash_table_iter_init (&iter, session->tracks);
       while (g_hash_table_iter_next (&iter, &key, &value))
-        if (GPOINTER_TO_INT (value) != GST_RTSP_RUNTIME_CLOSED + 1)
-          g_hash_table_iter_replace (&iter, GINT_TO_POINTER (state + 1));
+        if (((RuntimeTrack *)value)->state != GST_RTSP_RUNTIME_CLOSED)
+          ((RuntimeTrack *)value)->state = state;
     }
   else if (g_hash_table_contains (session->tracks, client->uri))
     {
-      g_hash_table_replace (session->tracks, g_strdup (client->uri), GINT_TO_POINTER (state + 1));
+      ((RuntimeTrack *)g_hash_table_lookup (session->tracks, client->uri))->state = state;
     }
 }
 static GstRTSPResult
@@ -169,8 +181,8 @@ gst_rtsp_runtime_client_request (GstRTSPRuntimeClient *client, GstRTSPMessage *r
     }
   if (session && method != GST_RTSP_SETUP)
     {
-      gpointer state = g_hash_table_lookup (session->tracks, request->type_data.request.uri);
-      if (state && GPOINTER_TO_INT (state) == GST_RTSP_RUNTIME_CLOSED + 1)
+      RuntimeTrack *track = g_hash_table_lookup (session->tracks, request->type_data.request.uri);
+      if (track && track->state == GST_RTSP_RUNTIME_CLOSED)
         {
           g_free (id);
           return GST_RTSP_EINVAL;
@@ -246,10 +258,11 @@ gst_rtsp_runtime_client_receive (GstRTSPRuntimeClient *client, GstRTSPMessage *m
                     == GST_RTSP_OK
                 && gst_rtsp_message_get_header (message, GST_RTSP_HDR_TRANSPORT, NULL, 1)
                        != GST_RTSP_OK
-                && gst_rtsp_transport_parse (transport_value, transport) == GST_RTSP_OK;
-          gst_rtsp_transport_free (transport);
+                && gst_rtsp_transport_parse_version (transport_value, client->version, transport)
+                       == GST_RTSP_OK;
           if (!valid)
             {
+              gst_rtsp_transport_free (transport);
               g_free (id);
               return unknown (client, GST_RTSP_EPARSE);
             }
@@ -258,14 +271,23 @@ gst_rtsp_runtime_client_receive (GstRTSPRuntimeClient *client, GstRTSPMessage *m
             {
               session = g_new0 (RuntimeSession, 1);
               session->aggregate = g_strdup (client->root);
-              session->tracks = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+              session->tracks = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, track_free);
               g_hash_table_insert (client->sessions, g_strdup (id), session);
             }
-          if (!g_hash_table_contains (session->tracks, client->uri)
-              || GPOINTER_TO_INT (g_hash_table_lookup (session->tracks, client->uri))
-                     == GST_RTSP_RUNTIME_CLOSED + 1)
-            g_hash_table_insert (session->tracks, g_strdup (client->uri),
-                                 GINT_TO_POINTER (GST_RTSP_RUNTIME_READY + 1));
+          RuntimeTrack *track = g_hash_table_lookup (session->tracks, client->uri);
+          if (!track)
+            {
+              track = g_new0 (RuntimeTrack, 1);
+              track->state = GST_RTSP_RUNTIME_READY;
+              g_hash_table_insert (session->tracks, g_strdup (client->uri), track);
+            }
+          else
+            {
+              if (track->state == GST_RTSP_RUNTIME_CLOSED)
+                track->state = GST_RTSP_RUNTIME_READY;
+              gst_rtsp_transport_free (track->transport);
+            }
+          track->transport = transport;
         }
       else if (client->method == GST_RTSP_PLAY)
         transition (client, session, GST_RTSP_RUNTIME_PLAYING);
@@ -283,7 +305,7 @@ gst_rtsp_runtime_client_receive (GstRTSPRuntimeClient *client, GstRTSPMessage *m
       gpointer key, value;
       g_hash_table_iter_init (&iter, session->tracks);
       while (g_hash_table_iter_next (&iter, &key, &value))
-        g_hash_table_iter_replace (&iter, GINT_TO_POINTER (GST_RTSP_RUNTIME_CLOSED + 1));
+        ((RuntimeTrack *)value)->state = GST_RTSP_RUNTIME_CLOSED;
     }
   client->dispatch = GST_RTSP_RUNTIME_RESPONSE_RECEIVED;
   pending_clear (client);
@@ -317,8 +339,16 @@ gst_rtsp_runtime_client_track_state (GstRTSPRuntimeClient *client, const gchar *
   gpointer value = session ? g_hash_table_lookup (session->tracks, uri) : NULL;
   if (!value)
     return FALSE;
-  *state = GPOINTER_TO_INT (value) - 1;
+  *state = ((RuntimeTrack *)value)->state;
   return TRUE;
+}
+const GstRTSPTransport *
+gst_rtsp_runtime_client_track_transport (GstRTSPRuntimeClient *client, const gchar *id,
+                                         const gchar *uri)
+{
+  RuntimeSession *session = lookup (client, id);
+  RuntimeTrack *track = session ? g_hash_table_lookup (session->tracks, uri) : NULL;
+  return track ? track->transport : NULL;
 }
 void
 gst_rtsp_runtime_client_cancel (GstRTSPRuntimeClient *client)

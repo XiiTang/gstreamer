@@ -2,6 +2,7 @@
 #ifndef GST_RTSP_RUNTIME_CLIENT_H
 #define GST_RTSP_RUNTIME_CLIENT_H
 #include <gst/rtsp/gstrtspconnection.h>
+#include <gst/rtsp/gstrtsptransport.h>
 G_BEGIN_DECLS
 
 typedef struct _GstRTSPRuntimeClient GstRTSPRuntimeClient;
@@ -47,6 +48,11 @@ GstRTSPRuntimeDispatch gst_rtsp_runtime_client_dispatch (GstRTSPRuntimeClient *c
 GST_RTSP_API
 gboolean gst_rtsp_runtime_client_track_state (GstRTSPRuntimeClient *client, const gchar *session,
                                               const gchar *uri, GstRTSPRuntimeState *state);
+/* Borrowed only until the next serialized operation or owner destruction. */
+GST_RTSP_API
+const GstRTSPTransport *gst_rtsp_runtime_client_track_transport (GstRTSPRuntimeClient *client,
+                                                                 const gchar *session,
+                                                                 const gchar *uri);
 /* Cancellation is the only operation allowed concurrently with receive/write.
  * The owner must join those operations before free. Neither sends TEARDOWN. */
 GST_RTSP_API
