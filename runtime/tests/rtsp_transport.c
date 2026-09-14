@@ -2,6 +2,7 @@
  * The socket pair stands in for the Runtime's already protected byte stream. */
 #include "gstrtspconnection.h"
 #include "gstrtspruntimeclient.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <gst/gst.h>
 #include <string.h>
@@ -327,6 +328,73 @@ versioned_transport (void)
   g_print ("PASS version-specific native Transport tuples, IPv6, SSRC list and strict rejection\n");
 }
 
+static void
+incremental_duplex_write (void)
+{
+  int peer;
+  const guint size = 2 * 1024 * 1024;
+  GstRTSPConnection *conn = connection (&peer, size);
+  GstRTSPMessage request = { 0 }, response = { 0 };
+  guint8 *payload = g_malloc (size);
+  memset (payload, 0xab, size);
+  gst_rtsp_message_init_request (&request, GST_RTSP_SET_PARAMETER,
+                                 "rtsp://never-resolve.invalid/media");
+  gst_rtsp_message_set_body (&request, payload, size);
+  g_free (payload);
+  g_assert_cmpint (gst_rtsp_connection_write_begin (conn, &request), ==, 0);
+  g_assert_cmpint (gst_rtsp_connection_write_begin (conn, &request), ==, 1);
+  gst_rtsp_message_unset (&request);
+  gint64 start = g_get_monotonic_time ();
+  g_assert_cmpint (gst_rtsp_connection_write_step (conn), ==, 1);
+  g_assert_cmpint (g_get_monotonic_time () - start, <, 200000);
+  g_assert_cmpuint (gst_rtsp_connection_written_bytes (conn), >, 0);
+  const gchar *incoming = "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 3\r\n\r\nabc";
+  g_assert_cmpint (write (peer, incoming, strlen (incoming)), ==, strlen (incoming));
+  g_assert_cmpint (gst_rtsp_connection_receive_step (conn, &response), ==, 0);
+  g_assert_cmpint (response.type_data.response.code, ==, 200);
+  gst_rtsp_message_unset (&response);
+  g_assert_cmpint (fcntl (peer, F_SETFL, O_NONBLOCK), ==, 0);
+  GByteArray *wire = g_byte_array_new ();
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  while (TRUE)
+    {
+      g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+      guint8 bytes[65536];
+      ssize_t count = read (peer, bytes, sizeof (bytes));
+      if (count > 0)
+        g_byte_array_append (wire, bytes, count);
+      else
+        g_assert_true (count == -1 && (errno == EAGAIN || errno == EWOULDBLOCK));
+      gboolean pending = gst_rtsp_connection_write_pending (conn);
+      if (pending)
+        g_assert_cmpint (gst_rtsp_connection_write_step (conn), >=, 0);
+      if (!pending && count < 0)
+        break;
+    }
+  const gchar *body = g_strstr_len ((gchar *)wire->data, wire->len, "\r\n\r\n");
+  g_assert_nonnull (body);
+  body += 4;
+  g_assert_cmpuint (wire->len - (body - (gchar *)wire->data), ==, size);
+  for (guint i = 0; i < size; i++)
+    g_assert_cmpuint ((guint8)body[i], ==, 0xab);
+  g_assert_cmpuint (gst_rtsp_connection_written_bytes (conn), ==, wire->len);
+  g_byte_array_unref (wire);
+  payload = g_malloc0 (size);
+  gst_rtsp_message_init_request (&request, GST_RTSP_SET_PARAMETER,
+                                 "rtsp://never-resolve.invalid/media");
+  gst_rtsp_message_take_body (&request, payload, size);
+  g_assert_cmpint (gst_rtsp_connection_write_begin (conn, &request), ==, 0);
+  gst_rtsp_message_unset (&request);
+  g_assert_cmpint (gst_rtsp_connection_write_step (conn), ==, 1);
+  gst_rtsp_connection_flush (conn, TRUE);
+  g_assert_cmpint (gst_rtsp_connection_write_step (conn), ==, GST_RTSP_EINTR);
+  g_assert_false (gst_rtsp_connection_write_pending (conn));
+  gst_rtsp_connection_free (conn);
+  close (peer);
+  g_print ("PASS native partial-write duplex progress, owned serialization, exact bytes and "
+           "cancellation\n");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -334,6 +402,7 @@ main (int argc, char **argv)
   roundtrip (GST_RTSP_VERSION_1_0, "1.0");
   roundtrip (GST_RTSP_VERSION_2_0, "2.0");
   versioned_transport ();
+  incremental_duplex_write ();
   truncated_cancel ();
   malformed ();
   explicit_state (GST_RTSP_VERSION_1_0);

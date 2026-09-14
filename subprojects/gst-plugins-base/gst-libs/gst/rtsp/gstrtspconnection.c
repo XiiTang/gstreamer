@@ -167,6 +167,7 @@ struct _GstRTSPConnection
   gboolean capturing;
   GstRTSPBuilder *runtime_builder;
   GstRTSPMessage *runtime_message;
+  GstRTSPSerializedMessage *runtime_writer;
   GSocketClient *client;
   GIOStream *stream0;
   GIOStream *stream1;
@@ -2145,6 +2146,77 @@ serialize_message (GstRTSPConnection * conn, GstRTSPMessage * message,
   return TRUE;
 }
 
+/* One owned serialization at a time. Admission and progress are separate so
+ * partial writes cannot prevent the owner from servicing inbound control/data. */
+int
+gst_rtsp_connection_write_begin (GstRTSPConnection *conn, GstRTSPMessage *message)
+{
+  g_return_val_if_fail (conn && conn->runtime_io && message, GST_RTSP_EINVAL);
+  if (conn->runtime_writer) return 1;
+  if (!gst_rtsp_message_is_safe_to_serialize (message) ||
+      message->body_size > conn->content_length_limit) return GST_RTSP_EINVAL;
+  GstRTSPSerializedMessage *writer = g_new0 (GstRTSPSerializedMessage, 1);
+  if (!serialize_message (conn, message, writer)) {
+    gst_rtsp_serialized_message_clear (writer); g_free (writer);
+    return GST_RTSP_EINVAL;
+  }
+  if (writer->data_size > conn->capture_limit ||
+      writer->body_data_size > conn->capture_limit - writer->data_size) {
+    gst_rtsp_serialized_message_clear (writer); g_free (writer);
+    return GST_RTSP_ENOMEM;
+  }
+  if (writer->body_data) writer->body_data = g_memdup2 (writer->body_data, writer->body_data_size);
+  if (writer->body_buffer) {
+    gsize length = gst_buffer_get_size (writer->body_buffer);
+    if (length > conn->capture_limit - writer->data_size) {
+      gst_rtsp_serialized_message_clear (writer); g_free (writer); return GST_RTSP_ENOMEM;
+    }
+    writer->body_data = g_malloc (length);
+    gst_buffer_extract (writer->body_buffer, 0, writer->body_data, length);
+    writer->body_data_size = length;
+    writer->body_buffer = NULL;
+  }
+  writer->borrowed = FALSE;
+  conn->runtime_writer = writer;
+  conn->written_bytes = 0;
+  return GST_RTSP_OK;
+}
+int
+gst_rtsp_connection_write_step (GstRTSPConnection *conn)
+{
+  g_return_val_if_fail (conn && conn->runtime_io, GST_RTSP_EINVAL);
+  GstRTSPSerializedMessage *writer = conn->runtime_writer;
+  if (!writer) return GST_RTSP_OK;
+  GOutputVector vectors[2];
+  guint count = 0;
+  if (writer->data_offset < writer->data_size) {
+    vectors[count].buffer = (writer->data_is_data_header ? writer->data_header : writer->data) + writer->data_offset;
+    vectors[count++].size = writer->data_size - writer->data_offset;
+  }
+  if (writer->body_offset < writer->body_data_size) {
+    vectors[count].buffer = writer->body_data + writer->body_offset;
+    vectors[count++].size = writer->body_data_size - writer->body_offset;
+  }
+  GCancellable *cancellable = get_cancellable (conn);
+  gsize written = 0;
+  GstRTSPResult result = writev_bytes (conn->output_stream, vectors, count, &written, FALSE, cancellable);
+  gboolean cancelled = g_cancellable_is_cancelled (cancellable);
+  g_object_unref (cancellable);
+  conn->written_bytes += written;
+  gsize header = MIN (written, writer->data_size - writer->data_offset);
+  writer->data_offset += header;
+  writer->body_offset += written - header;
+  if (result == GST_RTSP_EINTR && !cancelled) return 1;
+  gst_rtsp_serialized_message_clear (writer);
+  g_clear_pointer (&conn->runtime_writer, g_free);
+  return cancelled ? GST_RTSP_EINTR : result;
+}
+gboolean
+gst_rtsp_connection_write_pending (GstRTSPConnection *conn)
+{
+  return conn && conn->runtime_writer != NULL;
+}
+
 /**
  * gst_rtsp_connection_send_usec:
  * @conn: a #GstRTSPConnection
@@ -2204,6 +2276,7 @@ gst_rtsp_connection_send_messages_usec (GstRTSPConnection * conn,
   g_return_val_if_fail (conn != NULL, GST_RTSP_EINVAL);
   g_return_val_if_fail (messages != NULL || n_messages == 0, GST_RTSP_EINVAL);
 
+  if (conn->runtime_writer) return GST_RTSP_EINVAL;
   conn->written_bytes = 0;
   if (conn->runtime_io) {
     for (guint n = 0; n < n_messages; n++)
@@ -3266,6 +3339,10 @@ gst_rtsp_connection_free (GstRTSPConnection * conn)
     conn->
         accept_certificate_destroy_notify (conn->accept_certificate_user_data);
 
+  if (conn->runtime_writer) {
+    gst_rtsp_serialized_message_clear (conn->runtime_writer);
+    g_free (conn->runtime_writer);
+  }
   if (conn->runtime_builder) {
     build_reset (conn->runtime_builder);
     g_free (conn->runtime_builder);
