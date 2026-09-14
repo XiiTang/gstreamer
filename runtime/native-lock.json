@@ -1,0 +1,6 @@
+{
+  "libsrtp": {
+    "repository": "https://github.com/XiiTang/libsrtp.git",
+    "revision": "e3bd57c75b128ad6bc2fa3f713fad853326dffcc"
+  }
+}

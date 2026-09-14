@@ -27,15 +27,23 @@
 #include "gstsrtpelements.h"
 
 
-void
-srtp_element_init (GstPlugin * plugin)
+int
+gst_srtp_initialize_library (void)
 {
   static gsize res = FALSE;
+  static int status;
 
   if (g_once_init_enter (&res)) {
-    srtp_init ();
+    status = srtp_init ();
     gst_type_mark_as_plugin_api (GST_TYPE_SRTP_AUTH_TYPE, 0);
     gst_type_mark_as_plugin_api (GST_TYPE_SRTP_CIPHER_TYPE, 0);
     g_once_init_leave (&res, TRUE);
   }
+  return status;
+}
+
+void
+srtp_element_init (GstPlugin * plugin)
+{
+  gst_srtp_initialize_library ();
 }
