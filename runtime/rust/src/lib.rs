@@ -4,6 +4,7 @@ mod ffi;
 pub mod payload;
 pub mod rtp;
 pub mod rtsp;
+pub mod rtsp_auth;
 pub mod sdp;
 pub mod srtp;
 use std::sync::Once;
@@ -16,6 +17,7 @@ pub fn initialize() {
 pub struct Error(pub i32);
 impl Error {
     pub const INVALID: Self = Self(-2);
+    pub const AUTHENTICATION: Self = Self(-1001);
     pub const CANCELLED: Self = Self(-3);
     pub const EOF: Self = Self(-11);
     pub const TIMEOUT: Self = Self(-14);

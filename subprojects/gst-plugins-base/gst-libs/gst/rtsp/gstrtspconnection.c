@@ -125,6 +125,9 @@ gst_rtsp_serialized_message_clear (GstRTSPSerializedMessage * msg)
     g_free (msg->body_data);
     gst_buffer_replace (&msg->body_buffer, NULL);
   }
+  volatile guint8 *wipe = (volatile guint8 *) msg->data;
+  for (gsize i = 0; wipe && i < msg->data_size; i++)
+    wipe[i] = 0;
   g_free (msg->data);
 }
 

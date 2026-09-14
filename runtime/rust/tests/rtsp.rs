@@ -259,3 +259,116 @@ fn incremental_owned_request_and_declared_data_progress_while_read_is_partial() 
     assert_eq!(message.body, b"abc");
     assert!(client.send_data_begin(6, b"wrong channel").is_err());
 }
+
+fn auth_policy() -> imapipe_media::rtsp_auth::Policy {
+    use imapipe_media::rtsp_auth::{Algorithm, Policy, Qop};
+    Policy {
+        basic: true,
+        algorithms: vec![Algorithm::Sha256],
+        qops: vec![Qop::Auth, Qop::AuthInt],
+        realm: Some("camera".into()),
+        require_server_proof: true,
+    }
+}
+#[test]
+fn explicit_digest_dispatch_redacts_challenges_and_fails_closed_on_bad_proof() {
+    use imapipe_media::rtsp_auth::Qop;
+    let (stream, mut server) = UnixStream::pair().unwrap();
+    server.set_read_timeout(Some(SECOND)).unwrap();
+    let mut client = Rtsp::from_stream(stream.into(), URI, Version::V2, 4096).unwrap();
+    client
+        .configure_authentication(
+            "user".to_owned().into(),
+            "private-password".to_owned().into(),
+            auth_policy(),
+            true,
+        )
+        .unwrap();
+    client.request("OPTIONS", URI, &[], &[], SECOND).0.unwrap();
+    request(&mut server);
+    server.write_all(b"RTSP/2.0 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Digest realm=\"camera\",nonce=\"private-nonce\",algorithm=SHA-256,qop=\"auth,auth-int\"\r\n\r\n").unwrap();
+    let (result, message) = client.receive(SECOND);
+    result.unwrap();
+    assert_eq!(message.status, 401);
+    assert!(message.raw.is_empty());
+    assert!(
+        message
+            .headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(b"www-authenticate"))
+            .all(|(_, v)| v.is_empty())
+    );
+    let auth = message.authentication.unwrap();
+    assert!(auth.protected_headers);
+    assert_eq!(auth.challenges.len(), 1);
+    assert!(!format!("{auth:?}").contains("private-nonce"));
+    let (result, dispatch) =
+        client.request_authenticated_begin("SETUP", URI, &[], &[], "absent", Qop::Auth);
+    assert_eq!(result, Err(Error::AUTHENTICATION));
+    assert_eq!(dispatch.sequence, 0);
+    assert!(!dispatch.may_have_been_sent);
+    server.set_nonblocking(true).unwrap();
+    assert_eq!(
+        server.read(&mut [0]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    server.set_nonblocking(false).unwrap();
+    let (result, dispatch) = client.request_authenticated_begin(
+        "SETUP",
+        URI,
+        &[],
+        &[],
+        &auth.challenges[0].id,
+        Qop::AuthInt,
+    );
+    assert_eq!(result, Ok(true));
+    assert_eq!(dispatch.sequence, 2);
+    loop {
+        if client.write_step().0.unwrap() {
+            break;
+        }
+    }
+    let sent = String::from_utf8(request(&mut server)).unwrap();
+    assert!(sent.contains("Authorization: Digest "));
+    assert!(sent.contains(&format!("uri=\"{URI}\"")));
+    assert!(sent.contains("qop=auth-int"));
+    assert!(!sent.contains("private-password"));
+    server.write_all(b"RTSP/2.0 200 OK\r\nCSeq: 2\r\nSession: s\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\nAuthentication-Info: rspauth=\"wrong\"\r\n\r\n").unwrap();
+    let (result, message) = client.receive(SECOND);
+    assert_eq!(result, Err(Error::AUTHENTICATION));
+    assert!(message.raw.is_empty());
+    assert_eq!(message.authentication.unwrap().server_proof, Some(false));
+    assert_eq!(
+        client.state("s", URI).unwrap(),
+        Some(imapipe_media::rtsp::TrackState::Unknown)
+    );
+}
+#[test]
+fn rtsp2_basic_is_only_offered_over_verified_tls_and_never_auto_sent() {
+    for tls in [false, true] {
+        let (stream, mut server) = UnixStream::pair().unwrap();
+        let mut client = Rtsp::from_stream(stream.into(), URI, Version::V2, 4096).unwrap();
+        client
+            .configure_authentication(
+                "user".to_owned().into(),
+                "secret".to_owned().into(),
+                auth_policy(),
+                tls,
+            )
+            .unwrap();
+        client.request("OPTIONS", URI, &[], &[], SECOND).0.unwrap();
+        request(&mut server);
+        server.write_all(b"RTSP/2.0 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Basic realm=\"camera\"\r\n\r\n").unwrap();
+        let (result, message) = client.receive(SECOND);
+        result.unwrap();
+        assert_eq!(
+            message.authentication.unwrap().challenges.len(),
+            usize::from(tls)
+        );
+        server.set_nonblocking(true).unwrap();
+        assert_eq!(
+            server.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+}

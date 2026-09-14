@@ -84,5 +84,6 @@ int gst_runtime_rtsp_write_step (GstRuntimeRtsp *client, guint32 *sequence, int 
 GST_API
 int gst_runtime_rtsp_send_data_begin (GstRuntimeRtsp *client, guint8 channel, const guint8 *bytes,
                                       gsize length);
+GST_API void gst_runtime_rtsp_invalidate (GstRuntimeRtsp *client);
 G_END_DECLS
 #endif
