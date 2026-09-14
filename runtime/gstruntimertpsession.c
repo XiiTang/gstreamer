@@ -57,7 +57,7 @@ GstRuntimeRtpSession *
 gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
 {
   if (!settings || settings->payload_type > 127 || !settings->clock_rate
-      || settings->clock_rate > G_MAXINT)
+      || settings->clock_rate > G_MAXINT || settings->bandwidth_bps < 0)
     return NULL;
   GstRuntimeRtpSession *s = g_new0 (GstRuntimeRtpSession, 1);
   s->settings = *settings;
@@ -79,7 +79,7 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
   g_object_set (s->engine, "internal-ssrc", settings->ssrc, "probation", settings->probation,
                 "rtcp-min-interval", settings->rtcp_min_interval, "rtp-profile",
                 settings->feedback_profile ? GST_RTP_PROFILE_AVPF : GST_RTP_PROFILE_AVP,
-                "update-ntp64-header-ext", FALSE, NULL);
+                "update-ntp64-header-ext", FALSE, "bandwidth", settings->bandwidth_bps, NULL);
   if (s->encoded)
     {
       codec = *settings->payload;

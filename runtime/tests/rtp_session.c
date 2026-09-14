@@ -18,6 +18,7 @@ main (void)
 {
   gst_init (NULL, NULL);
   GstRuntimeRtpSettings settings = { 7, 96, 90000, 0, 10 * GST_MSECOND, TRUE, TRUE };
+  settings.bandwidth_bps = 128000;
   GstRuntimeRtpSession *a = gst_runtime_rtp_session_new (&settings);
   settings.ssrc = 8;
   GstRuntimeRtpSession *b = gst_runtime_rtp_session_new (&settings);

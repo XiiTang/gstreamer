@@ -16,6 +16,7 @@ pub struct Configuration<'a> {
     pub probation: u32,
     pub reports: Option<Duration>,
     pub feedback_profile: bool,
+    pub bandwidth_bps: Option<u64>,
     pub payload: Option<&'a crate::payload::Configuration<'a>>,
     pub reorder_latency: Option<Duration>,
 }
@@ -53,6 +54,7 @@ struct Settings {
     payload: *const crate::payload::Settings,
     reorder: i32,
     latency_ms: u32,
+    bandwidth_bps: f64,
 }
 unsafe extern "C" {
     fn gst_runtime_rtp_session_new(settings: *const Settings) -> *mut c_void;
@@ -121,6 +123,7 @@ impl Session {
                 .map_err(|_| Error(-5))?,
             reports: i32::from(c.reports.is_some()),
             feedback_profile: i32::from(c.feedback_profile),
+            bandwidth_bps: c.bandwidth_bps.unwrap_or(0) as f64,
             payload: std::ptr::null(),
             reorder: i32::from(c.reorder_latency.is_some()),
             latency_ms: c
@@ -219,6 +222,7 @@ mod tests {
             probation: 0,
             reports: None,
             feedback_profile: false,
+            bandwidth_bps: None,
             payload: None,
             reorder_latency: None,
         })
