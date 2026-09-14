@@ -71,10 +71,10 @@ fields (GstRTSPMessage *message, const GstRuntimeHeader *headers, gsize count, c
   return GST_RTSP_OK;
 }
 
-int
-gst_runtime_rtsp_request (GstRuntimeRtsp *client, const char *method, const char *uri,
-                          const GstRuntimeHeader *headers, gsize count, const guint8 *body,
-                          gsize length, gint64 timeout, guint32 *sequence, int *dispatch)
+static int
+request_mode (GstRuntimeRtsp *client, const char *method, const char *uri,
+              const GstRuntimeHeader *headers, gsize count, const guint8 *body, gsize length,
+              gint64 timeout, guint32 *sequence, int *dispatch, gboolean incremental)
 {
   GstRTSPMessage message = { 0 };
   *sequence = 0;
@@ -88,7 +88,8 @@ gst_runtime_rtsp_request (GstRuntimeRtsp *client, const char *method, const char
     result = fields (&message, headers, count, body, length);
   if (result == GST_RTSP_OK)
     {
-      result = gst_rtsp_runtime_client_request (client->client, &message, timeout);
+      result = incremental ? gst_rtsp_runtime_client_request_begin (client->client, &message)
+                           : gst_rtsp_runtime_client_request (client->client, &message, timeout);
       if (result != GST_RTSP_EINVAL)
         {
           *sequence = gst_rtsp_runtime_client_cseq (client->client);
@@ -100,9 +101,26 @@ gst_runtime_rtsp_request (GstRuntimeRtsp *client, const char *method, const char
 }
 
 int
-gst_runtime_rtsp_respond (GstRuntimeRtsp *client, int status, const char *reason,
+gst_runtime_rtsp_request (GstRuntimeRtsp *client, const char *method, const char *uri,
                           const GstRuntimeHeader *headers, gsize count, const guint8 *body,
-                          gsize length, gint64 timeout)
+                          gsize length, gint64 timeout, guint32 *sequence, int *dispatch)
+{
+  return request_mode (client, method, uri, headers, count, body, length, timeout, sequence,
+                       dispatch, FALSE);
+}
+int
+gst_runtime_rtsp_request_begin (GstRuntimeRtsp *client, const char *method, const char *uri,
+                                const GstRuntimeHeader *headers, gsize count, const guint8 *body,
+                                gsize length, guint32 *sequence, int *dispatch)
+{
+  return request_mode (client, method, uri, headers, count, body, length, 0, sequence, dispatch,
+                       TRUE);
+}
+
+static int
+respond_mode (GstRuntimeRtsp *client, int status, const char *reason,
+              const GstRuntimeHeader *headers, gsize count, const guint8 *body, gsize length,
+              gint64 timeout, gboolean incremental)
 {
   if (status < 100 || status > 999)
     return GST_RTSP_EINVAL;
@@ -112,9 +130,39 @@ gst_runtime_rtsp_respond (GstRuntimeRtsp *client, int status, const char *reason
   if (result == GST_RTSP_OK)
     result = fields (&message, headers, count, body, length);
   if (result == GST_RTSP_OK)
-    result = gst_rtsp_runtime_client_respond (client->client, &message, timeout);
+    result = incremental ? gst_rtsp_runtime_client_respond_begin (client->client, &message)
+                         : gst_rtsp_runtime_client_respond (client->client, &message, timeout);
   gst_rtsp_message_unset (&message);
   return result;
+}
+
+int
+gst_runtime_rtsp_respond (GstRuntimeRtsp *client, int status, const char *reason,
+                          const GstRuntimeHeader *headers, gsize count, const guint8 *body,
+                          gsize length, gint64 timeout)
+{
+  return respond_mode (client, status, reason, headers, count, body, length, timeout, FALSE);
+}
+int
+gst_runtime_rtsp_respond_begin (GstRuntimeRtsp *client, int status, const char *reason,
+                                const GstRuntimeHeader *headers, gsize count, const guint8 *body,
+                                gsize length)
+{
+  return respond_mode (client, status, reason, headers, count, body, length, 0, TRUE);
+}
+int
+gst_runtime_rtsp_write_step (GstRuntimeRtsp *client, guint32 *sequence, int *dispatch)
+{
+  int result = gst_rtsp_runtime_client_write_step (client->client);
+  *sequence = gst_rtsp_runtime_client_cseq (client->client);
+  *dispatch = gst_rtsp_runtime_client_written_bytes (client->client) > 0;
+  return result;
+}
+int
+gst_runtime_rtsp_send_data_begin (GstRuntimeRtsp *client, guint8 channel, const guint8 *bytes,
+                                  gsize length)
+{
+  return gst_rtsp_runtime_client_send_data_begin (client->client, channel, bytes, length);
 }
 
 int

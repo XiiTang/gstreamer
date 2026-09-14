@@ -47,6 +47,37 @@ pub struct TransportView {
 }
 unsafe extern "C" {
     pub fn gst_runtime_initialize();
+    pub fn gst_runtime_rtsp_request_begin(
+        client: *mut c_void,
+        method: *const c_char,
+        uri: *const c_char,
+        headers: *const Header,
+        count: usize,
+        body: *const u8,
+        length: usize,
+        sequence: *mut u32,
+        dispatch: *mut c_int,
+    ) -> c_int;
+    pub fn gst_runtime_rtsp_respond_begin(
+        client: *mut c_void,
+        status: c_int,
+        reason: *const c_char,
+        headers: *const Header,
+        count: usize,
+        body: *const u8,
+        length: usize,
+    ) -> c_int;
+    pub fn gst_runtime_rtsp_write_step(
+        client: *mut c_void,
+        sequence: *mut u32,
+        dispatch: *mut c_int,
+    ) -> c_int;
+    pub fn gst_runtime_rtsp_send_data_begin(
+        client: *mut c_void,
+        channel: u8,
+        bytes: *const u8,
+        length: usize,
+    ) -> c_int;
     pub fn gst_runtime_rtsp_transport(
         client: *mut c_void,
         session: *const c_char,

@@ -70,5 +70,19 @@ GST_API
 void gst_runtime_rtsp_cancel (GstRuntimeRtsp *client);
 GST_API
 void gst_runtime_rtsp_free (GstRuntimeRtsp *client);
+GST_API
+int gst_runtime_rtsp_request_begin (GstRuntimeRtsp *client, const char *method, const char *uri,
+                                    const GstRuntimeHeader *headers, gsize count,
+                                    const guint8 *body, gsize length, guint32 *sequence,
+                                    int *dispatch);
+GST_API
+int gst_runtime_rtsp_respond_begin (GstRuntimeRtsp *client, int status, const char *reason,
+                                    const GstRuntimeHeader *headers, gsize count,
+                                    const guint8 *body, gsize length);
+GST_API
+int gst_runtime_rtsp_write_step (GstRuntimeRtsp *client, guint32 *sequence, int *dispatch);
+GST_API
+int gst_runtime_rtsp_send_data_begin (GstRuntimeRtsp *client, guint8 channel, const guint8 *bytes,
+                                      gsize length);
 G_END_DECLS
 #endif
