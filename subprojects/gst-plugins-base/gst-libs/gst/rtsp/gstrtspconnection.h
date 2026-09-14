@@ -412,6 +412,14 @@ G_GNUC_END_IGNORE_DEPRECATIONS
 GST_RTSP_API
 int gst_rtsp_connection_receive_step (GstRTSPConnection *conn, GstRTSPMessage *message);
 
+/* Native single-message admission/progress: 1 means occupied or pending. */
+GST_RTSP_API
+int gst_rtsp_connection_write_begin (GstRTSPConnection *conn, GstRTSPMessage *message);
+GST_RTSP_API
+int gst_rtsp_connection_write_step (GstRTSPConnection *conn);
+GST_RTSP_API
+gboolean gst_rtsp_connection_write_pending (GstRTSPConnection *conn);
+
 G_END_DECLS
 
 #endif /* __GST_RTSP_CONNECTION_H__ */
