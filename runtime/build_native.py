@@ -29,7 +29,7 @@ env=dict(os.environ)
 env['PATH']=str(pathlib.Path(a.meson).resolve().parent)+os.pathsep+env.get('PATH','')
 if a.dependency_prefix:
  env['PKG_CONFIG_PATH']=os.pathsep.join(str(path/'lib/pkgconfig') for path in a.dependency_prefix)
-options=['--buildtype=release','--default-library=static','-Dauto_features=disabled',
+options=['-Dpkg_config_path='+','.join(str(path/'lib/pkgconfig') for path in a.dependency_prefix),'--buildtype=release','--default-library=static','-Dauto_features=disabled',
  '-Dbase=enabled','-Dgood=enabled','-Dbad=enabled','-Dugly=disabled','-Dlibav=disabled',
  '-Ddevtools=disabled','-Dges=disabled','-Drtsp_server=disabled','-Dorc=disabled',
  '-Dintrospection=disabled','-Dtests=disabled','-Dexamples=disabled','-Ddoc=disabled',
