@@ -65,6 +65,7 @@ GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (dtlsdec, "dtlsdec", GST_RANK_NONE,
 enum
 {
   SIGNAL_ON_KEY_RECEIVED,
+  SIGNAL_ACCEPT_PEER_CERTIFICATE,
   NUM_SIGNALS
 };
 
@@ -107,7 +108,7 @@ static GstPad *gst_dtls_dec_request_new_pad (GstElement *, GstPadTemplate *,
     const gchar * name, const GstCaps *);
 static void gst_dtls_dec_release_pad (GstElement *, GstPad *);
 
-static void on_key_received (GstDtlsConnection *, gpointer key, guint cipher,
+static void on_key_received (GstDtlsConnection *, gpointer key, guint length, guint cipher,
     guint auth, GstDtlsDec *);
 static gboolean on_peer_certificate_received (GstDtlsConnection *, gchar * pem,
     GstDtlsDec *);
@@ -145,6 +146,10 @@ gst_dtls_dec_class_init (GstDtlsDecClass * klass)
       g_signal_new ("on-key-received", G_TYPE_FROM_CLASS (klass),
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 
+  signals[SIGNAL_ACCEPT_PEER_CERTIFICATE] =
+      g_signal_new ("accept-peer-certificate", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_BOOLEAN, 1, G_TYPE_STRING);
+
   properties[PROP_CONNECTION_ID] =
       g_param_spec_string ("connection-id",
       "Connection id",
@@ -168,14 +173,14 @@ gst_dtls_dec_class_init (GstDtlsDecClass * klass)
       g_param_spec_boxed ("decoder-key",
       "Decoder key",
       "SRTP key that should be used by the decoder",
-      GST_TYPE_CAPS, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+      GST_TYPE_BUFFER, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
   properties[PROP_SRTP_CIPHER] =
       g_param_spec_uint ("srtp-cipher",
       "SRTP cipher",
       "The SRTP cipher selected in the DTLS handshake. "
       "The value will be set to an GstDtlsSrtpCipher.",
-      0, GST_DTLS_SRTP_CIPHER_AES_128_ICM, DEFAULT_SRTP_CIPHER,
+      0, GST_DTLS_SRTP_CIPHER_AES_256_GCM, DEFAULT_SRTP_CIPHER,
       G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
   properties[PROP_SRTP_AUTH] =
@@ -439,11 +444,10 @@ gst_dtls_dec_release_pad (GstElement * element, GstPad * pad)
 }
 
 static void
-on_key_received (GstDtlsConnection * connection, gpointer key, guint cipher,
+on_key_received (GstDtlsConnection * connection, gpointer key, guint length, guint cipher,
     guint auth, GstDtlsDec * self)
 {
   GstBuffer *new_decoder_key;
-  gchar *key_str;
 
   g_return_if_fail (GST_IS_DTLS_DEC (self));
 
@@ -451,16 +455,13 @@ on_key_received (GstDtlsConnection * connection, gpointer key, guint cipher,
   self->srtp_auth = auth;
 
   new_decoder_key =
-      gst_buffer_new_memdup (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
+      gst_dtls_srtp_key_buffer (key, length);
 
   if (self->decoder_key)
     gst_buffer_unref (self->decoder_key);
 
   self->decoder_key = new_decoder_key;
 
-  key_str = g_base64_encode (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
-  GST_INFO_OBJECT (self, "received key: %s", key_str);
-  g_free (key_str);
 
   g_signal_emit (self, signals[SIGNAL_ON_KEY_RECEIVED], 0);
 }
@@ -469,9 +470,9 @@ static gboolean
 on_peer_certificate_received (GstDtlsConnection * connection, gchar * pem,
     GstDtlsDec * self)
 {
-  g_return_val_if_fail (GST_IS_DTLS_DEC (self), TRUE);
+  gboolean accepted = FALSE;
 
-  GST_DEBUG_OBJECT (self, "Received peer certificate PEM: \n%s", pem);
+  g_return_val_if_fail (GST_IS_DTLS_DEC (self), FALSE);
 
   if (self->peer_pem != NULL) {
     g_free (self->peer_pem);
@@ -480,8 +481,9 @@ on_peer_certificate_received (GstDtlsConnection * connection, gchar * pem,
   self->peer_pem = g_strdup (pem);
 
   g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_PEER_PEM]);
+  g_signal_emit (self, signals[SIGNAL_ACCEPT_PEER_CERTIFICATE], 0, pem, &accepted);
 
-  return TRUE;
+  return accepted;
 }
 
 static GstFlowReturn

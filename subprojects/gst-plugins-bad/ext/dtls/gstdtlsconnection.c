@@ -87,6 +87,9 @@ struct _GstDtlsConnectionPrivate
   gboolean is_client;
   gboolean is_alive;
   gboolean keys_exported;
+  gboolean peer_verified;
+  gboolean started;
+  GstClockID timeout_id;
 
   GstDtlsConnectionState connection_state;
   gboolean sent_close_notify;
@@ -113,6 +116,7 @@ G_DEFINE_TYPE_WITH_CODE (GstDtlsConnection, gst_dtls_connection,
         "DTLS Connection"));
 
 static void gst_dtls_connection_finalize (GObject * gobject);
+static void cancel_timeout_locked (GstDtlsConnection * self);
 static void gst_dtls_connection_set_property (GObject *, guint prop_id,
     const GValue *, GParamSpec *);
 static void gst_dtls_connection_get_property (GObject *, guint prop_id,
@@ -149,12 +153,12 @@ gst_dtls_connection_class_init (GstDtlsConnectionClass * klass)
   signals[SIGNAL_ON_DECODER_KEY] =
       g_signal_new ("on-decoder-key", G_TYPE_FROM_CLASS (klass),
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-      G_TYPE_NONE, 3, G_TYPE_POINTER, G_TYPE_UINT, G_TYPE_UINT);
+      G_TYPE_NONE, 4, G_TYPE_POINTER, G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT);
 
   signals[SIGNAL_ON_ENCODER_KEY] =
       g_signal_new ("on-encoder-key", G_TYPE_FROM_CLASS (klass),
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-      G_TYPE_NONE, 3, G_TYPE_POINTER, G_TYPE_UINT, G_TYPE_UINT);
+      G_TYPE_NONE, 4, G_TYPE_POINTER, G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT);
 
   signals[SIGNAL_ON_PEER_CERTIFICATE] =
       g_signal_new ("on-peer-certificate", G_TYPE_FROM_CLASS (klass),
@@ -216,6 +220,7 @@ gst_dtls_connection_finalize (GObject * gobject)
   GstDtlsConnection *self = GST_DTLS_CONNECTION (gobject);
   GstDtlsConnectionPrivate *priv = self->priv;
 
+  cancel_timeout_locked (self);
   g_thread_pool_free (priv->thread_pool, TRUE, TRUE);
   priv->thread_pool = NULL;
 
@@ -339,6 +344,15 @@ gst_dtls_connection_start (GstDtlsConnection * self, gboolean is_client,
   g_mutex_lock (&priv->mutex);
   GST_TRACE_OBJECT (self, "locked @ start");
 
+  if (priv->started) {
+    g_mutex_unlock (&priv->mutex);
+    if (err)
+      *err = g_error_new_literal (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_SETTINGS,
+          "Create a new DTLS connection for a new handshake");
+    return FALSE;
+  }
+  priv->started = TRUE;
+  priv->peer_verified = FALSE;
   priv->is_alive = TRUE;
   priv->bio_buffer = NULL;
   priv->bio_buffer_len = 0;
@@ -418,22 +432,45 @@ handle_timeout (gpointer data, gpointer user_data)
   }
 }
 
+typedef struct {
+  GWeakRef connection;
+} TimeoutReference;
+
+static void
+timeout_reference_free (gpointer value)
+{
+  TimeoutReference *reference = value;
+  g_weak_ref_clear (&reference->connection);
+  g_free (reference);
+}
+
+static void
+cancel_timeout_locked (GstDtlsConnection *self)
+{
+  GstClockID id = self->priv->timeout_id;
+  self->priv->timeout_id = NULL;
+  if (id) {
+    gst_clock_id_unschedule (id);
+    gst_clock_id_unref (id);
+  }
+}
+
 static gboolean
 schedule_timeout_handling (GstClock * clock, GstClockTime time, GstClockID id,
     gpointer user_data)
 {
-  GstDtlsConnection *self = user_data;
-
+  TimeoutReference *reference = user_data;
+  GstDtlsConnection *self = g_weak_ref_get (&reference->connection);
+  if (!self)
+    return TRUE;
   g_mutex_lock (&self->priv->mutex);
-  if (self->priv->is_alive && !self->priv->timeout_pending) {
+  if (id == self->priv->timeout_id && self->priv->is_alive &&
+      !self->priv->timeout_pending) {
     self->priv->timeout_pending = TRUE;
-
-    GST_TRACE_OBJECT (self, "Schedule timeout now");
-    g_thread_pool_push (self->priv->thread_pool, GINT_TO_POINTER (0xc0ffee),
-        NULL);
+    g_thread_pool_push (self->priv->thread_pool, GINT_TO_POINTER (0xc0ffee), NULL);
   }
   g_mutex_unlock (&self->priv->mutex);
-
+  g_object_unref (self);
   return TRUE;
 }
 
@@ -448,6 +485,9 @@ gst_dtls_connection_check_timeout_locked (GstDtlsConnection * self)
 
   priv = self->priv;
 
+  cancel_timeout_locked (self);
+  if (!priv->is_alive)
+    return;
   if (DTLSv1_get_timeout (priv->ssl, &timeout)) {
     wait_time = ((gint64) timeout.tv_sec) * G_USEC_PER_SEC + timeout.tv_usec;
 
@@ -455,22 +495,19 @@ gst_dtls_connection_check_timeout_locked (GstDtlsConnection * self)
     if (wait_time) {
       GstClock *system_clock = gst_system_clock_obtain ();
       GstClockID clock_id;
-#ifndef G_DISABLE_ASSERT
+      TimeoutReference *reference;
       GstClockReturn clock_return;
-#endif
 
       end_time = gst_clock_get_time (system_clock) + wait_time * GST_USECOND;
 
       clock_id = gst_clock_new_single_shot_id (system_clock, end_time);
-#ifndef G_DISABLE_ASSERT
-      clock_return =
-#else
-      (void)
-#endif
-          gst_clock_id_wait_async (clock_id, schedule_timeout_handling,
-          g_object_ref (self), (GDestroyNotify) g_object_unref);
-      g_assert (clock_return == GST_CLOCK_OK);
-      gst_clock_id_unref (clock_id);
+      reference = g_new0 (TimeoutReference, 1);
+      g_weak_ref_init (&reference->connection, self);
+      priv->timeout_id = clock_id;
+      clock_return = gst_clock_id_wait_async (clock_id, schedule_timeout_handling,
+          reference, timeout_reference_free);
+      if (clock_return != GST_CLOCK_OK)
+        cancel_timeout_locked (self);
       gst_object_unref (system_clock);
     } else {
       if (self->priv->is_alive && !self->priv->timeout_pending) {
@@ -519,6 +556,7 @@ gst_dtls_connection_stop (GstDtlsConnection * self)
   GST_TRACE_OBJECT (self, "locked @ stop");
 
   self->priv->is_alive = FALSE;
+  cancel_timeout_locked (self);
   if (self->priv->connection_state != GST_DTLS_CONNECTION_STATE_FAILED
       && self->priv->connection_state != GST_DTLS_CONNECTION_STATE_CLOSED) {
     self->priv->connection_state = GST_DTLS_CONNECTION_STATE_CLOSED;
@@ -554,6 +592,7 @@ gst_dtls_connection_close (GstDtlsConnection * self)
   g_mutex_lock (&self->priv->mutex);
   GST_TRACE_OBJECT (self, "locked @ close");
 
+  cancel_timeout_locked (self);
   if (self->priv->is_alive) {
     self->priv->is_alive = FALSE;
     g_cond_signal (&self->priv->condition);
@@ -860,106 +899,118 @@ log_state (GstDtlsConnection * self, const gchar * str)
 #endif
 }
 
+typedef struct {
+  gsize size;
+  guint8 bytes[];
+} PrivateKey;
+
+static void
+private_key_free (gpointer value)
+{
+  PrivateKey *key = value;
+  OPENSSL_cleanse (key->bytes, key->size);
+  g_free (key);
+}
+
+GstBuffer *
+gst_dtls_srtp_key_buffer (gconstpointer bytes, guint length)
+{
+  PrivateKey *key;
+  g_return_val_if_fail (length == 30 || length == 28 || length == 44, NULL);
+  key = g_malloc (sizeof (*key) + length);
+  key->size = length;
+  memcpy (key->bytes, bytes, length);
+  return gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, key->bytes,
+      length, 0, length, key, private_key_free);
+}
+
+gboolean
+gst_dtls_connection_set_srtp_profiles (GstDtlsConnection *self, const gchar *profiles)
+{
+  gchar **names;
+  guint i;
+  gboolean valid = TRUE;
+  g_return_val_if_fail (GST_IS_DTLS_CONNECTION (self), FALSE);
+  if (!profiles || !profiles[0])
+    return FALSE;
+  names = g_strsplit (profiles, ":", -1);
+  for (i = 0; names[i]; i++) {
+    if (strcmp (names[i], "SRTP_AES128_CM_SHA1_80") &&
+        strcmp (names[i], "SRTP_AEAD_AES_128_GCM") &&
+        strcmp (names[i], "SRTP_AEAD_AES_256_GCM")) {
+      valid = FALSE;
+      break;
+    }
+  }
+  g_strfreev (names);
+  if (!valid)
+    return FALSE;
+  g_mutex_lock (&self->priv->mutex);
+  valid = !self->priv->started &&
+      SSL_set_tlsext_use_srtp (self->priv->ssl, profiles) == 0;
+  g_mutex_unlock (&self->priv->mutex);
+  return valid;
+}
+
 static gboolean
 export_srtp_keys (GstDtlsConnection * self, GError ** err)
 {
-  typedef struct
-  {
-    guint8 v[SRTP_KEY_LEN];
-  } Key;
-
-  typedef struct
-  {
-    guint8 v[SRTP_SALT_LEN];
-  } Salt;
-
-  struct
-  {
-    Key client_key;
-    Key server_key;
-    Salt client_salt;
-    Salt server_salt;
-  } exported_keys;
-
-  struct
-  {
-    Key key;
-    Salt salt;
-  } client_key, server_key;
-
+  guint8 exported[88] = { 0 }, client[44] = { 0 }, server[44] = { 0 };
   SRTP_PROTECTION_PROFILE *profile;
   GstDtlsSrtpCipher cipher;
   GstDtlsSrtpAuth auth;
-  gint success;
+  guint key_length, salt_length, length;
+  gboolean success = FALSE;
+  const gchar *failure = "No verified peer identity for SRTP key export";
+  static const gchar label[] = "EXTRACTOR-dtls_srtp";
 
-  static gchar export_string[] = "EXTRACTOR-dtls_srtp";
-
-  success = SSL_export_keying_material (self->priv->ssl,
-      (gpointer) & exported_keys, 60, export_string, strlen (export_string),
-      NULL, 0, 0);
-
-  if (!success) {
-    GST_WARNING_OBJECT (self, "Failed to export SRTP keys");
-    if (err)
-      *err =
-          g_error_new_literal (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_READ,
-          "Failed to export SRTP keys");
-    return FALSE;
-  }
-
+  if (!self->priv->peer_verified)
+    goto done;
   profile = SSL_get_selected_srtp_profile (self->priv->ssl);
-
-  if (!profile) {
-    GST_WARNING_OBJECT (self,
-        "No SRTP capabilities negotiated during handshake");
-    if (err)
-      *err =
-          g_error_new_literal (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_READ,
-          "No SRTP capabilities negotiated during handshake");
-    return FALSE;
-  }
-
-  GST_INFO_OBJECT (self, "keys received, profile is %s", profile->name);
-
+  failure = "No supported SRTP profile negotiated";
+  if (!profile)
+    goto done;
   switch (profile->id) {
     case SRTP_AES128_CM_SHA1_80:
       cipher = GST_DTLS_SRTP_CIPHER_AES_128_ICM;
       auth = GST_DTLS_SRTP_AUTH_HMAC_SHA1_80;
+      key_length = 16; salt_length = 14;
       break;
-    case SRTP_AES128_CM_SHA1_32:
-      cipher = GST_DTLS_SRTP_CIPHER_AES_128_ICM;
-      auth = GST_DTLS_SRTP_AUTH_HMAC_SHA1_32;
+    case SRTP_AEAD_AES_128_GCM:
+      cipher = GST_DTLS_SRTP_CIPHER_AES_128_GCM;
+      auth = GST_DTLS_SRTP_AUTH_NULL;
+      key_length = 16; salt_length = 12;
+      break;
+    case SRTP_AEAD_AES_256_GCM:
+      cipher = GST_DTLS_SRTP_CIPHER_AES_256_GCM;
+      auth = GST_DTLS_SRTP_AUTH_NULL;
+      key_length = 32; salt_length = 12;
       break;
     default:
-      GST_WARNING_OBJECT (self,
-          "Invalid/unsupported crypto suite set by handshake");
-      if (err)
-        *err =
-            g_error_new_literal (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_READ,
-            "Invalid/unsupported crypto suite set by handshake");
-      return FALSE;
+      goto done;
   }
-
-  client_key.key = exported_keys.client_key;
-  server_key.key = exported_keys.server_key;
-  client_key.salt = exported_keys.client_salt;
-  server_key.salt = exported_keys.server_salt;
-
-  if (self->priv->is_client) {
-    g_signal_emit (self, signals[SIGNAL_ON_ENCODER_KEY], 0, &client_key, cipher,
-        auth);
-    g_signal_emit (self, signals[SIGNAL_ON_DECODER_KEY], 0, &server_key,
-        cipher, auth);
-  } else {
-    g_signal_emit (self, signals[SIGNAL_ON_ENCODER_KEY], 0, &server_key,
-        cipher, auth);
-    g_signal_emit (self, signals[SIGNAL_ON_DECODER_KEY], 0, &client_key, cipher,
-        auth);
-  }
-
+  length = key_length + salt_length;
+  failure = "Failed to export SRTP keys";
+  if (!SSL_export_keying_material (self->priv->ssl, exported, 2 * length,
+          label, sizeof (label) - 1, NULL, 0, 0))
+    goto done;
+  memcpy (client, exported, key_length);
+  memcpy (server, exported + key_length, key_length);
+  memcpy (client + key_length, exported + 2 * key_length, salt_length);
+  memcpy (server + key_length, exported + 2 * key_length + salt_length, salt_length);
+  g_signal_emit (self, signals[SIGNAL_ON_ENCODER_KEY], 0,
+      self->priv->is_client ? client : server, length, cipher, auth);
+  g_signal_emit (self, signals[SIGNAL_ON_DECODER_KEY], 0,
+      self->priv->is_client ? server : client, length, cipher, auth);
   self->priv->keys_exported = TRUE;
-
-  return TRUE;
+  success = TRUE;
+done:
+  OPENSSL_cleanse (exported, sizeof (exported));
+  OPENSSL_cleanse (client, sizeof (client));
+  OPENSSL_cleanse (server, sizeof (server));
+  if (!success && err)
+    *err = g_error_new_literal (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_READ, failure);
+  return success;
 }
 
 static int
@@ -1147,6 +1198,8 @@ openssl_verify_callback (int preverify_ok, X509_STORE_CTX * x509_ctx)
     g_free (pem);
   }
 
+  if (X509_STORE_CTX_get_error_depth (x509_ctx) == 0)
+    self->priv->peer_verified = accepted;
   return accepted;
 }
 

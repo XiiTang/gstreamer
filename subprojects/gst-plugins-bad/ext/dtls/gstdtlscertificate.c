@@ -137,6 +137,8 @@ gst_dtls_certificate_finalize (GObject * gobject)
   priv->private_key = NULL;
 
 
+  if (priv->pem)
+    OPENSSL_cleanse (priv->pem, strlen (priv->pem));
   g_free (priv->pem);
   priv->pem = NULL;
 
