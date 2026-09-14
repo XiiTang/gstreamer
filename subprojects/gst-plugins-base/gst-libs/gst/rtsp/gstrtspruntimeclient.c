@@ -604,3 +604,27 @@ gst_rtsp_runtime_client_invalidate (GstRTSPRuntimeClient *client)
     }
   gst_rtsp_connection_flush (client->connection, TRUE);
 }
+
+gboolean
+gst_rtsp_runtime_client_request_ready (GstRTSPRuntimeClient *client)
+{
+  return client && !client->unknown && !client->pending
+         && !gst_rtsp_connection_write_pending (client->connection);
+}
+gboolean
+gst_rtsp_runtime_client_session_active (GstRTSPRuntimeClient *client, const gchar *id)
+{
+  RuntimeSession *session = client ? lookup (client, id) : NULL;
+  if (!session)
+    return FALSE;
+  GHashTableIter iter;
+  gpointer key, value;
+  g_hash_table_iter_init (&iter, session->tracks);
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+      GstRTSPRuntimeState state = ((RuntimeTrack *)value)->state;
+      if (state != GST_RTSP_RUNTIME_CLOSED && state != GST_RTSP_RUNTIME_UNKNOWN)
+        return TRUE;
+    }
+  return FALSE;
+}

@@ -81,5 +81,8 @@ int gst_rtsp_runtime_client_send_data_begin (GstRTSPRuntimeClient *client, guint
 GST_RTSP_API
 gsize gst_rtsp_runtime_client_written_bytes (GstRTSPRuntimeClient *client);
 GST_RTSP_API void gst_rtsp_runtime_client_invalidate (GstRTSPRuntimeClient *client);
+GST_RTSP_API gboolean gst_rtsp_runtime_client_request_ready (GstRTSPRuntimeClient *client);
+GST_RTSP_API gboolean gst_rtsp_runtime_client_session_active (GstRTSPRuntimeClient *client,
+                                                              const gchar *session);
 G_END_DECLS
 #endif
