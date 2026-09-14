@@ -1,0 +1,21 @@
+--- a/meson.build
++++ b/meson.build
+@@ -831,7 +831,17 @@
+ endif
+ 
+ foreach f : functions
+-  if cc.has_function(f)
++  have_function = cc.has_function(f)
++  # New SDKs can link pipe2 even when the deployment target cannot call it.
++  # Check the annotated declaration before enabling the existing pipe2 path.
++  if have_function and host_system == 'darwin' and f == 'pipe2'
++    have_function = cc.links('''
++      #include <unistd.h>
++      int main(void) { int fds[2]; return pipe2(fds, 0); }
++      ''', args: ['-Werror=unguarded-availability-new'],
++      name: 'pipe2 at the macOS deployment target')
++  endif
++  if have_function
+     define = 'HAVE_' + f.underscorify().to_upper()
+     glib_conf.set(define, 1)
+     glib_conf_prefix = glib_conf_prefix + '#define @0@ 1\n'.format(define)
