@@ -756,6 +756,9 @@ queue_do_insert (RTPJitterBuffer * jbuf, GList * list, GList * item)
   else
     queue->tail = item;
   queue->length++;
+  RTPJitterBufferItem *packet = (RTPJitterBufferItem *) item;
+  if (packet->type == ITEM_TYPE_BUFFER)
+    jbuf->packet_bytes += gst_buffer_get_size (packet->data);
 }
 
 GstClockTime
@@ -1410,6 +1413,9 @@ rtp_jitter_buffer_pop (RTPJitterBuffer * jbuf, gint * percent)
     else
       queue->tail = NULL;
     queue->length--;
+    RTPJitterBufferItem *packet = (RTPJitterBufferItem *) item;
+    if (packet->type == ITEM_TYPE_BUFFER)
+      jbuf->packet_bytes -= gst_buffer_get_size (packet->data);
   }
 
   /* buffering mode, update buffer stats */
@@ -1466,6 +1472,7 @@ rtp_jitter_buffer_flush (RTPJitterBuffer * jbuf, GFunc free_func,
 
   while ((item = g_queue_pop_head_link (&jbuf->packets)))
     free_func ((RTPJitterBufferItem *) item, user_data);
+  jbuf->packet_bytes = 0;
 }
 
 /**
@@ -1690,8 +1697,12 @@ rtp_jitter_buffer_can_fast_start (RTPJitterBuffer * jbuf, gint num_packet)
 gboolean
 rtp_jitter_buffer_is_full (RTPJitterBuffer * jbuf)
 {
-  return rtp_jitter_buffer_get_seqnum_diff (jbuf) >= 32765 &&
-      rtp_jitter_buffer_num_packets (jbuf) > 10000;
+  /* Keep the existing joined queue-pressure path, also for equal timestamps.
+   * Reserve one maximum datagram before the next append. */
+  return jbuf->packet_bytes > 16 * 1024 * 1024 - 65536 ||
+      rtp_jitter_buffer_num_packets (jbuf) >= 4096 ||
+      (rtp_jitter_buffer_get_seqnum_diff (jbuf) >= 32765 &&
+       rtp_jitter_buffer_num_packets (jbuf) > 10000);
 }
 
 

@@ -378,6 +378,16 @@ gst_rtp_mp4g_depay_queue (GstRtpMP4GDepay * rtpmp4gdepay, GstBuffer * outbuf)
 {
   guint AU_index = GST_BUFFER_OFFSET (outbuf);
 
+  gsize queued = gst_buffer_get_size (outbuf);
+  for (GList *entry = rtpmp4gdepay->packets->head; entry; entry = entry->next)
+    queued += gst_buffer_get_size (entry->data);
+  if (queued > 16 * 1024 * 1024 || rtpmp4gdepay->packets->length >= 4096) {
+    GST_ELEMENT_ERROR (rtpmp4gdepay, RESOURCE, NO_SPACE_LEFT,
+        ("AAC reorder queue exceeds native buffer capacity"), (NULL));
+    gst_buffer_unref (outbuf);
+    return;
+  }
+
   if (rtpmp4gdepay->next_AU_index == -1) {
     GST_DEBUG_OBJECT (rtpmp4gdepay, "Init AU counter %u", AU_index);
     rtpmp4gdepay->next_AU_index = AU_index;
@@ -457,6 +467,16 @@ gst_rtp_mp4g_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
     guint AU_headers_len;
     guint AU_size, AU_index, AU_index_delta, payload_AU_size;
     gboolean M;
+
+    /* Bound the native incomplete access unit, including NAL/JPEG header growth.
+     * An outer appsrc limit cannot bound fragments retained by the depayloader. */
+    if (gst_adapter_available (rtpmp4gdepay->adapter)
+        + 2 * (gsize) gst_rtp_buffer_get_payload_len (rtp) + 1024 > 16 * 1024 * 1024) {
+      GST_ELEMENT_ERROR (rtpmp4gdepay, RESOURCE, NO_SPACE_LEFT,
+          ("RTP access unit exceeds native materialization capacity"), (NULL));
+      gst_adapter_clear (rtpmp4gdepay->adapter);
+      return NULL;
+    }
 
     payload_len = gst_rtp_buffer_get_payload_len (rtp);
     payload = gst_rtp_buffer_get_payload (rtp);

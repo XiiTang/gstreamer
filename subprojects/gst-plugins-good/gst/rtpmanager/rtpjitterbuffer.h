@@ -74,6 +74,7 @@ struct _RTPJitterBuffer {
   GObject        object;
 
   GQueue         packets;
+  gsize          packet_bytes;
 
   RTPJitterBufferMode mode;
 
