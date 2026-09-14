@@ -71,6 +71,17 @@ GstBuffer *gst_dtls_srtp_key_buffer (gconstpointer key, guint length);
 /* Only callable before starting a new handshake. No fallback profiles. */
 gboolean gst_dtls_connection_set_srtp_profiles (GstDtlsConnection *, const gchar *);
 
+/* A private owner may verify the entire presented chain outside OpenSSL's
+ * trust store. DER slices are borrowed only for the duration of the callback;
+ * index zero is the leaf. Installing it after start is forbidden. */
+typedef struct {
+  const guint8 *data;
+  gsize length;
+} GstDtlsCertificateDer;
+typedef gboolean (*GstDtlsVerifyChain) (const GstDtlsCertificateDer *, gsize, gpointer);
+gboolean gst_dtls_connection_set_chain_verifier (GstDtlsConnection *,
+    GstDtlsVerifyChain, gpointer);
+
 typedef enum
 {
   GST_DTLS_CONNECTION_STATE_NEW,
