@@ -510,7 +510,10 @@ GstRTSPResult
 gst_rtsp_runtime_client_wait (GstRTSPRuntimeClient *client, gint64 timeout)
 {
   GstRTSPEvent events;
-  return gst_rtsp_connection_poll_usec (client->connection, GST_RTSP_EV_READ, &events, timeout);
+  GstRTSPEvent requested = GST_RTSP_EV_READ;
+  if (gst_rtsp_connection_write_pending (client->connection))
+    requested |= GST_RTSP_EV_WRITE;
+  return gst_rtsp_connection_poll_usec (client->connection, requested, &events, timeout);
 }
 guint32
 gst_rtsp_runtime_client_cseq (GstRTSPRuntimeClient *client)
