@@ -103,7 +103,7 @@ fn selected_description_owns_caps_and_enforces_the_negotiated_track() {
         )
         .is_err()
     );
-    let session = rtp::Session::new(rtp::Configuration {
+    let mut session = rtp::Session::new(rtp::Configuration {
         negotiated: Some(&selected),
         ..config
     })
