@@ -4,6 +4,7 @@ mod ffi;
 pub mod payload;
 pub mod rtp;
 pub mod rtsp;
+pub mod sdp;
 pub mod srtp;
 use std::sync::Once;
 static INITIALIZE: Once = Once::new();

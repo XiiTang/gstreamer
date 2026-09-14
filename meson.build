@@ -519,6 +519,7 @@ if building_full
     init_static_plugins_c,
     'runtime/gstruntimepayload.c',
     'runtime/gstruntimeapi.c',
+    'runtime/gstruntimesdp.c',
     'runtime/gstruntimepayloadapi.c',
     'runtime/gstruntimesrtpapi.c',
     'runtime/gstruntimertpsession.c',
