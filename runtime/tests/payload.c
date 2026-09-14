@@ -167,6 +167,92 @@ session_roundtrip (GstRuntimePayloadFormat format, const guint8 *data, gsize len
   g_print ("PASS shared RTP session payload %u: %u packets, jitter, decoded frame timestamp\n",
            format, count);
 }
+static void
+incomplete_access_unit_bound (void)
+{
+  for (int format = GST_RUNTIME_PAYLOAD_H264; format <= GST_RUNTIME_PAYLOAD_H265; format++)
+    {
+      GstRuntimePayloadSettings codec = { .format = format,
+                                          .payload_type = 96,
+                                          .ssrc = 7,
+                                          .mtu = 1200,
+                                          .clock_rate = 90000,
+                                          .channels = 1 };
+      GstRuntimeRtpSettings settings
+          = { .ssrc = 7, .payload_type = 96, .clock_rate = 90000, .payload = &codec };
+      GstRuntimeRtpSession *session = gst_runtime_rtp_session_new (&settings);
+      g_assert_nonnull (session);
+      guint8 *packet = g_malloc0 (60000);
+      packet[0] = 0x80;
+      packet[1] = 96;
+      packet[11] = 8;
+      guint count = 0;
+      int result = 0;
+      gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+      while (result >= 0 && g_get_monotonic_time () < deadline)
+        {
+          packet[2] = count >> 8;
+          packet[3] = count;
+          packet[12] = format == GST_RUNTIME_PAYLOAD_H264 ? 0x7c : 0x62;
+          packet[13] = format == GST_RUNTIME_PAYLOAD_H264 ? (count ? 5 : 0x85) : 1;
+          if (format == GST_RUNTIME_PAYLOAD_H265)
+            packet[14] = count ? 1 : 0x81;
+          result = gst_runtime_rtp_session_try_write (session, 1, packet, 60000);
+          if (result == 0)
+            count++;
+          if (result < 0)
+            break;
+          GstRuntimePayloadFrame *frame = NULL;
+          result = gst_runtime_rtp_session_pull (session, 1, 0, &frame);
+          g_assert_null (frame);
+          if (result == 1)
+            g_usleep (100);
+        }
+      g_assert_cmpint (result, <, 0);
+      g_assert_cmpuint (count, <, 400);
+      gst_runtime_rtp_session_free (session);
+      g_free (packet);
+    }
+  g_print ("PASS incomplete H264/H265 fragments fail at native access-unit capacity\n");
+}
+static void
+jitter_byte_pressure_stop (void)
+{
+  GstRuntimeRtpSettings settings
+      = { .ssrc = 7, .payload_type = 96, .clock_rate = 90000, .reorder = TRUE, .latency_ms = 1 };
+  GstRuntimeRtpSession *session = gst_runtime_rtp_session_new (&settings);
+  g_assert_nonnull (session);
+  guint8 *packet = g_malloc0 (16000);
+  packet[0] = 0x80;
+  packet[1] = 96;
+  packet[11] = 8;
+  guint count = 0, pressured = 0;
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  while (pressured < 50 && g_get_monotonic_time () < deadline)
+    {
+      packet[2] = count >> 8;
+      packet[3] = count;
+      int result = gst_runtime_rtp_session_try_write (session, 1, packet, 16000);
+      g_assert_cmpint (result, >=, 0);
+      if (result == 0)
+        {
+          count++;
+          pressured = 0;
+        }
+      else
+        {
+          pressured++;
+          g_usleep (1000);
+        }
+      g_assert_cmpuint (count, <, 1500);
+    }
+  g_assert_cmpuint (pressured, ==, 50);
+  gint64 start = g_get_monotonic_time ();
+  gst_runtime_rtp_session_free (session);
+  g_assert_cmpint (g_get_monotonic_time () - start, <, 200000);
+  g_free (packet);
+  g_print ("PASS equal-timestamp jitter byte pressure and joined stop\n");
+}
 typedef struct
 {
   GstRuntimePayload *payload;
@@ -326,6 +412,8 @@ main (int argc, char **argv)
       g_free (input);
       g_free (output);
     }
+  incomplete_access_unit_bound ();
+  jitter_byte_pressure_stop ();
   jpeg_rejection (argv[1]);
   raw_and_stop ();
   return 0;

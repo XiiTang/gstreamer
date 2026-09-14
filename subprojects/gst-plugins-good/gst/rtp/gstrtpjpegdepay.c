@@ -446,6 +446,16 @@ gst_rtp_jpeg_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
     rtpjpegdepay->discont = TRUE;
   }
 
+  /* Bound the native incomplete access unit, including NAL/JPEG header growth.
+   * An outer appsrc limit cannot bound fragments retained by the depayloader. */
+  if (gst_adapter_available (rtpjpegdepay->adapter)
+      + 2 * (gsize) gst_rtp_buffer_get_payload_len (rtp) + 1024 > 16 * 1024 * 1024) {
+    GST_ELEMENT_ERROR (rtpjpegdepay, RESOURCE, NO_SPACE_LEFT,
+        ("RTP access unit exceeds native materialization capacity"), (NULL));
+    gst_adapter_clear (rtpjpegdepay->adapter);
+    return NULL;
+  }
+
   payload_len = gst_rtp_buffer_get_payload_len (rtp);
 
   if (payload_len < 8)
