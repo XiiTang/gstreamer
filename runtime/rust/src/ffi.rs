@@ -43,6 +43,7 @@ pub struct TransportView {
     pub dest_count: u32,
     pub ssrc_count: u32,
     pub ssrcs: *const u32,
+    pub generation: u64,
 }
 unsafe extern "C" {
     pub fn gst_runtime_initialize();

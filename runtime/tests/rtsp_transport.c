@@ -216,7 +216,9 @@ explicit_state (GstRTSPVersion version)
   operation (client, pair[1], version, GST_RTSP_DESCRIBE, root, NULL, seq++, 302,
              "Location: rtsp://must-not-connect.invalid/new\r\n");
   operation (client, pair[1], version, GST_RTSP_SETUP, one, NULL, seq++, 200, setup);
-  operation (client, pair[1], version, GST_RTSP_SETUP, two, session, seq++, 200, setup);
+  operation (
+      client, pair[1], version, GST_RTSP_SETUP, two, session, seq++, 200,
+      "Session: retained-session;timeout=30\r\nTransport: RTP/AVP/TCP;unicast;interleaved=2-3\r\n");
   const GstRTSPTransport *negotiated
       = gst_rtsp_runtime_client_track_transport (client, session, one);
   g_assert_nonnull (negotiated);

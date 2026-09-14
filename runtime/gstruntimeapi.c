@@ -199,6 +199,7 @@ gst_runtime_rtsp_transport (GstRuntimeRtsp *client, const char *session, const c
       = gst_rtsp_runtime_client_track_transport (client->client, session, uri);
   if (!transport)
     return 1;
+  view->generation = gst_rtsp_runtime_client_track_generation (client->client, session, uri);
   view->profile = transport->profile;
   view->lower_transport = transport->lower_transport;
   view->mode_play = transport->mode_play;

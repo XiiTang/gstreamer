@@ -27,6 +27,7 @@ typedef struct
   guint32 src_port[2], dest_port[2];
   guint32 src_count, dest_count, ssrc_count;
   const guint32 *ssrcs;
+  guint64 generation;
 } GstRuntimeRtspTransportView;
 /* View pointers are borrowed until the next serialized client operation. */
 GST_API
