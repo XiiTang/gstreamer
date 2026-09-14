@@ -47,8 +47,11 @@ main (void)
     {
       g_assert_cmpint (g_get_monotonic_time (), <, report_deadline);
       gst_runtime_rtp_session_report (b, GST_SECOND);
-      g_assert_cmpint (
-          gst_runtime_rtp_session_read (b, 2, buffer, sizeof (buffer), &length, GST_SECOND), ==, 0);
+      int result = gst_runtime_rtp_session_read (b, 2, buffer, sizeof (buffer), &length,
+                                                 100 * GST_MSECOND);
+      if (result == 1)
+        continue; /* Native randomized RTCP scheduling need not meet each poll. */
+      g_assert_cmpint (result, ==, 0);
       GstBuffer *report = gst_buffer_new_allocate (NULL, length, NULL);
       gst_buffer_fill (report, 0, buffer, length);
       g_assert_true (gst_rtcp_buffer_validate (report));
