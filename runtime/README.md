@@ -58,6 +58,9 @@ Meson wraps, compiling them into gst-full instead of loading developer-installed
 base libraries. macOS compilation targets 13.0. OpenSSL and the pinned libSRTP
 artifact are explicit private prefixes; platform packaging verifies their actual
 architecture and minimum OS before relocating and signing the complete closure.
+macOS builds reject unguarded calls to APIs newer than that deployment target.
+The GLib wrap patch checks the annotated `pipe2` declaration: a newer SDK's
+linkable symbol must not enable calls unavailable on the deployment OS.
 
 `tests/full_native.py` links the actual private artifact and tests RTSP, all seven
 payload formats, raw RTP, backpressure and joined stop. FFmpeg independently
