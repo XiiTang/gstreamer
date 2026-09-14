@@ -66,6 +66,18 @@ typedef struct _RTSPKeyValue
   gchar *custom_key;            /* custom header string (field is INVALID then) */
 } RTSPKeyValue;
 
+gboolean
+gst_rtsp_message_header_at (const GstRTSPMessage *msg, guint index,
+    const gchar **name, const gchar **value)
+{
+  if (!msg || !msg->hdr_fields || index >= msg->hdr_fields->len || !name || !value)
+    return FALSE;
+  const RTSPKeyValue *entry = &g_array_index (msg->hdr_fields, RTSPKeyValue, index);
+  *name = entry->custom_key ? entry->custom_key : gst_rtsp_header_as_text (entry->field);
+  *value = entry->value;
+  return TRUE;
+}
+
 static void
 key_value_foreach (GArray * array, GFunc func, gpointer user_data)
 {
@@ -1579,3 +1591,32 @@ gst_rtsp_auth_credentials_free (GstRTSPAuthCredential ** credentials)
 G_DEFINE_BOXED_TYPE (GstRTSPAuthCredential, gst_rtsp_auth_credential,
     (GBoxedCopyFunc) gst_rtsp_auth_credential_copy,
     (GBoxedFreeFunc) gst_rtsp_auth_credential_free);
+
+
+gboolean
+gst_rtsp_message_is_safe_to_serialize (const GstRTSPMessage *msg)
+{
+  const gchar *line = NULL;
+  if (!msg) return FALSE;
+  if (msg->type == GST_RTSP_MESSAGE_REQUEST)
+    line = msg->type_data.request.uri;
+  else if (msg->type == GST_RTSP_MESSAGE_RESPONSE)
+    line = msg->type_data.response.reason;
+  else if (msg->type == GST_RTSP_MESSAGE_DATA)
+    return msg->body_size <= G_MAXUINT16;
+  else
+    return FALSE;
+  if (!line || strchr (line, '\r') || strchr (line, '\n')) return FALSE;
+  if (msg->hdr_fields) {
+    for (guint i = 0; i < msg->hdr_fields->len; i++) {
+      const RTSPKeyValue *kv = &g_array_index (msg->hdr_fields, RTSPKeyValue, i);
+      if (!kv->value || strchr (kv->value, '\r') || strchr (kv->value, '\n')) return FALSE;
+      if (kv->custom_key) {
+        if (!kv->custom_key[0]) return FALSE;
+        for (const guchar *p = (const guchar *) kv->custom_key; *p; p++)
+          if (!g_ascii_isalnum (*p) && !strchr ("!#$%&'*+-.^_`|~", *p)) return FALSE;
+      }
+    }
+  }
+  return TRUE;
+}

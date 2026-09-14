@@ -231,11 +231,21 @@ GstRTSPResult      gst_rtsp_message_get_header_by_name    (GstRTSPMessage * msg,
                                                            gchar         ** value,
                                                            gint             index);
 
+/* Ordered native header access, including extensions and repeated fields.
+ * Borrowed strings remain valid until this message is changed or released. */
+GST_RTSP_API
+gboolean gst_rtsp_message_header_at (const GstRTSPMessage *msg, guint index,
+                                    const gchar **name, const gchar **value);
+
 /* header serialization */
 
 GST_RTSP_API
 GstRTSPResult      gst_rtsp_message_append_headers  (const GstRTSPMessage *msg,
                                                      GString *str);
+
+/* Validate structured fields before producing a Runtime-owned wire request. */
+GST_RTSP_API
+gboolean gst_rtsp_message_is_safe_to_serialize (const GstRTSPMessage *msg);
 
 /* handling the body */
 

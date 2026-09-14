@@ -45,6 +45,7 @@
 #include "gstrtpjpegpay.h"
 #include "gstrtputils.h"
 #include "gstbuffermemory.h"
+#include "gstrtpjpegdefaults.h"
 
 static GstStaticPadTemplate gst_rtp_jpeg_pay_sink_template =
     GST_STATIC_PAD_TEMPLATE ("sink",
@@ -691,6 +692,64 @@ wrong_size:
   }
 }
 
+/* RFC 2435 types 0/1 carry the standard tables implicitly. Dropping a
+ * custom DHT would change the decoded image, so reject it before output. */
+static gboolean
+gst_rtp_jpeg_pay_read_huffman (GstBufferMemoryMap * memory)
+{
+  guint end, length;
+  if (memory->total_size - memory->offset < 2)
+    return FALSE;
+  length = parse_mem_inc_offset_guint16 (memory);
+  if (length < 2 || length - 2 > memory->total_size - memory->offset)
+    return FALSE;
+  end = memory->offset + length - 2;
+  while (memory->offset < end) {
+    const guint8 *counts, *symbols;
+    guint count, selector;
+    if (end - memory->offset < 17)
+      return FALSE;
+    selector = parse_mem_inc_offset_guint8 (memory);
+    switch (selector) {
+      case 0x00: counts = lum_dc_codelens; symbols = lum_dc_symbols;
+        count = sizeof (lum_dc_symbols); break;
+      case 0x01: counts = chm_dc_codelens; symbols = chm_dc_symbols;
+        count = sizeof (chm_dc_symbols); break;
+      case 0x10: counts = lum_ac_codelens; symbols = lum_ac_symbols;
+        count = sizeof (lum_ac_symbols); break;
+      case 0x11: counts = chm_ac_codelens; symbols = chm_ac_symbols;
+        count = sizeof (chm_ac_symbols); break;
+      default: return FALSE;
+    }
+    for (guint i = 0; i < 16; i++)
+      if (parse_mem_inc_offset_guint8 (memory) != counts[i])
+        return FALSE;
+    if (count > end - memory->offset)
+      return FALSE;
+    for (guint i = 0; i < count; i++)
+      if (parse_mem_inc_offset_guint8 (memory) != symbols[i])
+        return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+gst_rtp_jpeg_pay_read_scan (GstBufferMemoryMap * memory, CompInfo info[])
+{
+  if (memory->total_size - memory->offset < 12 ||
+      parse_mem_inc_offset_guint16 (memory) != 12 ||
+      parse_mem_inc_offset_guint8 (memory) != 3)
+    return FALSE;
+  for (guint i = 0; i < 3; i++) {
+    if (parse_mem_inc_offset_guint8 (memory) != info[i].id ||
+        parse_mem_inc_offset_guint8 (memory) != (i == 0 ? 0x00 : 0x11))
+      return FALSE;
+  }
+  return parse_mem_inc_offset_guint8 (memory) == 0 &&
+      parse_mem_inc_offset_guint8 (memory) == 63 &&
+      parse_mem_inc_offset_guint8 (memory) == 0;
+}
+
 static RtpJpegMarker
 gst_rtp_jpeg_pay_scan_marker (GstBufferMemoryMap * memory)
 {
@@ -761,10 +820,13 @@ gst_rtp_jpeg_pay_handle_buffer (GstRTPBasePayload * basepayload,
     switch (marker) {
       case JPEG_MARKER_JFIF:
       case JPEG_MARKER_CMT:
-      case JPEG_MARKER_DHT:
       case JPEG_MARKER_H264:
         GST_LOG_OBJECT (pay, "skipping marker");
         gst_rtp_jpeg_pay_skipping_marker (&memory);
+        break;
+      case JPEG_MARKER_DHT:
+        if (!gst_rtp_jpeg_pay_read_huffman (&memory))
+          goto invalid_huffman;
         break;
       case JPEG_MARKER_SOF:
         if (!gst_rtp_jpeg_pay_read_sof (pay, &memory, info, tables,
@@ -780,9 +842,9 @@ gst_rtp_jpeg_pay_handle_buffer (GstRTPBasePayload * basepayload,
       case JPEG_MARKER_SOS:
         sos_found = TRUE;
         GST_LOG_OBJECT (pay, "SOS found");
+        if (!sof_found || !gst_rtp_jpeg_pay_read_scan (&memory, info))
+          goto invalid_huffman;
         jpeg_header_size = memory.offset;
-        /* Do not re-combine into single statement with previous line! */
-        jpeg_header_size += parse_mem_inc_offset_guint16 (&memory);
         break;
       case JPEG_MARKER_EOI:
         GST_WARNING_OBJECT (pay, "EOI reached before SOS!");
@@ -981,6 +1043,14 @@ gst_rtp_jpeg_pay_handle_buffer (GstRTPBasePayload * basepayload,
   return ret;
 
   /* ERRORS */
+invalid_huffman:
+  {
+    GST_ELEMENT_ERROR (pay, STREAM, FORMAT,
+        ("JPEG Huffman tables or scan cannot be represented by RTP JPEG"), (NULL));
+    gst_buffer_memory_unmap (&memory);
+    gst_buffer_unref (buffer);
+    return GST_FLOW_ERROR;
+  }
 unsupported_jpeg:
   {
     GST_ELEMENT_WARNING (pay, STREAM, FORMAT, ("Unsupported JPEG"), (NULL));

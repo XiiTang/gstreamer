@@ -1,0 +1,243 @@
+#include "gstruntimepayload.h"
+#include <gst/rtp/gstrtpbuffer.h>
+#include <string.h>
+
+static GstBuffer *
+buffer (const guint8 *data, gsize length)
+{
+  GstBuffer *value = gst_buffer_new_memdup (data, length);
+  GST_BUFFER_PTS (value) = 0;
+  GST_BUFFER_DURATION (value) = 20 * GST_MSECOND;
+  return value;
+}
+static void
+payload_roundtrip (GstRuntimePayloadFormat format, GstCaps *caps, const guint8 *data, gsize length,
+                   gboolean exact, const gchar *output_path)
+{
+  GError *error = NULL;
+  GstRuntimePayload *send
+      = gst_runtime_payload_new (format, TRUE, caps, 96, 123456, 65530, 0xffff0000, 256, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (send);
+  g_assert_cmpint (gst_runtime_payload_push (send, buffer (data, length)), ==, GST_FLOW_OK);
+  GstRuntimePayload *receive = NULL;
+  guint count = 0;
+  while (TRUE)
+    {
+      GstSample *sample
+          = gst_runtime_payload_pull (send, count ? 50 * GST_MSECOND : 2 * GST_SECOND);
+      if (!sample)
+        break;
+      if (!receive)
+        {
+          receive = gst_runtime_payload_new (format, FALSE, gst_sample_get_caps (sample), 96, 0, 0,
+                                             0, 256, &error);
+          g_assert_no_error (error);
+          g_assert_nonnull (receive);
+        }
+      GstBuffer *packet = gst_sample_get_buffer (sample);
+      GstRTPBuffer rtp = GST_RTP_BUFFER_INIT;
+      g_assert_true (gst_rtp_buffer_map (packet, GST_MAP_READ, &rtp));
+      g_assert_cmpuint (gst_rtp_buffer_get_ssrc (&rtp), ==, 123456);
+      g_assert_cmpuint (gst_rtp_buffer_get_seq (&rtp), ==, (guint16)(65530 + count));
+      g_assert_cmpuint (gst_buffer_get_size (packet), <=, 256);
+      gst_rtp_buffer_unmap (&rtp);
+      g_assert_cmpint (gst_runtime_payload_push (receive, gst_buffer_ref (packet)), ==,
+                       GST_FLOW_OK);
+      gst_sample_unref (sample);
+      count++;
+    }
+  GstMessage *failure = gst_runtime_payload_error (send);
+  if (failure)
+    {
+      GError *cause = NULL;
+      gst_message_parse_error (failure, &cause, NULL);
+      g_error ("Send failure: %s", cause->message);
+    }
+  g_assert_nonnull (receive);
+  g_assert_cmpuint (count, >, 0);
+  GstSample *decoded = gst_runtime_payload_pull (receive, 2 * GST_SECOND);
+  if (!decoded)
+    {
+      failure = gst_runtime_payload_error (receive);
+      if (failure)
+        {
+          GError *cause = NULL;
+          gst_message_parse_error (failure, &cause, NULL);
+          g_error ("Receive failure: %s", cause->message);
+        }
+    }
+  g_assert_nonnull (decoded);
+  GstMapInfo map;
+  g_assert_true (gst_buffer_map (gst_sample_get_buffer (decoded), &map, GST_MAP_READ));
+  if (exact)
+    g_assert_cmpmem (data, length, map.data, map.size);
+  if (output_path)
+    g_assert_true (g_file_set_contents (output_path, (gchar *)map.data, map.size, &error));
+  g_assert_no_error (error);
+  gst_buffer_unmap (gst_sample_get_buffer (decoded), &map);
+  gst_sample_unref (decoded);
+  gst_runtime_payload_free (send);
+  gst_runtime_payload_free (receive);
+  g_print ("PASS payload %u: %u RTP packets, sequence wrap, bounded MTU, recovered frame\n", format,
+           count);
+}
+typedef struct
+{
+  GstRuntimePayload *payload;
+  gint count;
+  GstFlowReturn result;
+} BlockedPush;
+static gpointer
+blocked_push (gpointer value)
+{
+  BlockedPush *push = value;
+  const guint8 bytes[160] = { 0 };
+  for (guint i = 0; i < 10000; i++)
+    {
+      push->result = gst_runtime_payload_push (push->payload, buffer (bytes, sizeof (bytes)));
+      if (push->result != GST_FLOW_OK)
+        break;
+      g_atomic_int_inc (&push->count);
+    }
+  return NULL;
+}
+static void
+raw_and_stop (void)
+{
+  GError *error = NULL;
+  GstCaps *caps = gst_caps_new_simple ("application/x-rtp", "media", G_TYPE_STRING, "audio",
+                                       "clock-rate", G_TYPE_INT, 8000, "encoding-name",
+                                       G_TYPE_STRING, "PCMU", "payload", G_TYPE_INT, 0, NULL);
+  GstRuntimePayload *raw
+      = gst_runtime_payload_new (GST_RUNTIME_PAYLOAD_RAW, TRUE, caps, 0, 0, 0, 0, 1200, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (raw);
+  const guint8 packet[] = { 0x80, 0, 0xff, 0xff, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0xff, 0, 1 };
+  g_assert_cmpint (gst_runtime_payload_push (raw, buffer (packet, sizeof (packet))), ==,
+                   GST_FLOW_OK);
+  GstSample *sample = gst_runtime_payload_pull (raw, GST_SECOND);
+  g_assert_nonnull (sample);
+  guint8 got[sizeof (packet)];
+  g_assert_cmpuint (gst_buffer_extract (gst_sample_get_buffer (sample), 0, got, sizeof (got)), ==,
+                    sizeof (got));
+  g_assert_cmpmem (packet, sizeof (packet), got, sizeof (got));
+  gst_sample_unref (sample);
+  const guint8 invalid[12] = { 0 };
+  g_assert_cmpint (gst_runtime_payload_push (raw, buffer (invalid, sizeof (invalid))), ==,
+                   GST_FLOW_ERROR);
+  gst_runtime_payload_free (raw);
+  gst_caps_unref (caps);
+  caps = gst_caps_new_simple ("audio/x-mulaw", "rate", G_TYPE_INT, 8000, "channels", G_TYPE_INT, 1,
+                              NULL);
+  BlockedPush push = { .payload = gst_runtime_payload_new (GST_RUNTIME_PAYLOAD_PCMU, TRUE, caps, 0,
+                                                           99, 0, 0, 1200, &error) };
+  g_assert_no_error (error);
+  gst_caps_unref (caps);
+  GThread *worker = g_thread_new ("bounded-payload", blocked_push, &push);
+  gint64 deadline = g_get_monotonic_time () + G_USEC_PER_SEC;
+  while (g_atomic_int_get (&push.count) < 8 && g_get_monotonic_time () < deadline)
+    g_usleep (1000);
+  g_usleep (20000);
+  g_assert_cmpint (g_atomic_int_get (&push.count), <, 10000);
+  gint64 start = g_get_monotonic_time ();
+  gst_runtime_payload_stop (push.payload);
+  g_thread_join (worker);
+  g_assert_cmpint (g_get_monotonic_time () - start, <, 200000);
+  g_assert_cmpint (push.result, ==, GST_FLOW_FLUSHING);
+  gst_runtime_payload_free (push.payload);
+  g_print (
+      "PASS raw RTP exact bytes, malformed RTP rejection, bounded backpressure and joined stop\n");
+}
+
+static void
+jpeg_rejection (const gchar *directory)
+{
+  gchar *path = g_build_filename (directory, "jpeg-optimized", NULL);
+  gchar *data = NULL;
+  gsize length;
+  GError *error = NULL;
+  g_assert_true (g_file_get_contents (path, &data, &length, &error));
+  GstCaps *caps
+      = gst_caps_new_simple ("image/jpeg", "width", G_TYPE_INT, 64, "height", G_TYPE_INT, 64, NULL);
+  GstRuntimePayload *send
+      = gst_runtime_payload_new (GST_RUNTIME_PAYLOAD_JPEG, TRUE, caps, 96, 123, 0, 0, 1200, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (send);
+  g_assert_cmpint (gst_runtime_payload_push (send, buffer ((guint8 *)data, length)), ==,
+                   GST_FLOW_OK);
+  g_assert_null (gst_runtime_payload_pull (send, GST_SECOND));
+  GstMessage *failure = gst_runtime_payload_error (send);
+  g_assert_nonnull (failure);
+  gst_message_parse_error (failure, &error, NULL);
+  g_assert_nonnull (strstr (error->message, "Huffman"));
+  g_clear_error (&error);
+  gst_message_unref (failure);
+  gst_runtime_payload_free (send);
+  gst_caps_unref (caps);
+  g_free (path);
+  g_free (data);
+  g_print ("PASS optimized JPEG rejected before emitting a corrupt RTP frame\n");
+}
+
+int
+main (int argc, char **argv)
+{
+  gst_init (&argc, &argv);
+  g_assert_cmpint (argc, ==, 2);
+  g_assert_null (gst_element_factory_find ("rtspsrc"));
+  g_assert_null (gst_element_factory_find ("filesink"));
+  guint8 audio[160];
+  for (guint i = 0; i < 160; i++)
+    audio[i] = (guint8)i;
+  GstCaps *caps = gst_caps_new_simple ("audio/x-alaw", "rate", G_TYPE_INT, 8000, "channels",
+                                       G_TYPE_INT, 1, NULL);
+  payload_roundtrip (GST_RUNTIME_PAYLOAD_PCMA, caps, audio, sizeof (audio), TRUE, NULL);
+  gst_caps_unref (caps);
+  caps = gst_caps_new_simple ("audio/x-mulaw", "rate", G_TYPE_INT, 8000, "channels", G_TYPE_INT, 1,
+                              NULL);
+  payload_roundtrip (GST_RUNTIME_PAYLOAD_PCMU, caps, audio, sizeof (audio), TRUE, NULL);
+  gst_caps_unref (caps);
+  const guint8 opus[] = { 0xf8, 0xff, 0xfe };
+  caps = gst_caps_new_simple ("audio/x-opus", "rate", G_TYPE_INT, 48000, "channels", G_TYPE_INT, 2,
+                              "channel-mapping-family", G_TYPE_INT, 0, NULL);
+  payload_roundtrip (GST_RUNTIME_PAYLOAD_OPUS, caps, opus, sizeof (opus), TRUE, NULL);
+  gst_caps_unref (caps);
+  const gchar *names[] = { "h264", "h265", "jpeg", "aac" };
+  const GstRuntimePayloadFormat formats[] = { GST_RUNTIME_PAYLOAD_H264, GST_RUNTIME_PAYLOAD_H265,
+                                              GST_RUNTIME_PAYLOAD_JPEG, GST_RUNTIME_PAYLOAD_AAC };
+  for (guint i = 0; i < 4; i++)
+    {
+      gchar *input = g_build_filename (argv[1], names[i], NULL), *encoded = NULL;
+      gsize length = 0;
+      GError *error = NULL;
+      g_assert_true (g_file_get_contents (input, &encoded, &length, &error));
+      g_assert_no_error (error);
+      if (i < 2)
+        caps = gst_caps_new_simple (i == 0 ? "video/x-h264" : "video/x-h265", "stream-format",
+                                    G_TYPE_STRING, "byte-stream", "alignment", G_TYPE_STRING, "au",
+                                    NULL);
+      else if (i == 2)
+        caps = gst_caps_new_simple ("image/jpeg", "width", G_TYPE_INT, 64, "height", G_TYPE_INT, 64,
+                                    NULL);
+      else
+        {
+          const guint8 asc[] = { 0x12, 0x10 };
+          GstBuffer *configuration = gst_buffer_new_memdup (asc, 2);
+          caps = gst_caps_new_simple ("audio/mpeg", "mpegversion", G_TYPE_INT, 4, "stream-format",
+                                      G_TYPE_STRING, "raw", "rate", G_TYPE_INT, 44100, "channels",
+                                      G_TYPE_INT, 2, "codec_data", GST_TYPE_BUFFER, configuration,
+                                      NULL);
+          gst_buffer_unref (configuration);
+        }
+      gchar *output = g_strconcat (input, ".recovered", NULL);
+      payload_roundtrip (formats[i], caps, (guint8 *)encoded, length, i == 3, output);
+      gst_caps_unref (caps);
+      g_free (encoded);
+      g_free (input);
+      g_free (output);
+    }
+  jpeg_rejection (argv[1]);
+  raw_and_stop ();
+  return 0;
+}

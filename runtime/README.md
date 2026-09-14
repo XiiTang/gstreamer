@@ -30,3 +30,35 @@ exporter bytes, fresh key material, trust rejection, missing verification,
 non-overlapping profile offers, restart rejection and 64 pending-timer lifetimes.
 No test key is logged or saved to disk. This build helper is for native tests;
 it is not the product's dependency discovery or packaging policy.
+
+## Controlled RTSP and RTP payloads
+
+`gst_rtsp_runtime_client_*` owns explicit RTSP 1.0/2.0 request and session/track
+state on a supplied connected stream. It never resolves or connects a target,
+selects a fallback version, follows a redirect, retries authentication or sends
+TEARDOWN during release. Responses preserve native parsed fields and exact wire
+bytes. Partial-message cancellation is interruptible; uncertain state is retained.
+The opaque `gstruntimeapi` ABI and `rust` crate give the Runtime an exclusive
+movable owner and a separately shareable cancellation handle.
+
+`gstruntimepayload` transforms encoded H264/H265/JPEG/Opus/MPEG4-GENERIC AAC/PCMA/
+PCMU frames and raw RTP using bounded appsrc/appsink queues. There is no encoder,
+decoder, player or arbitrary pipeline expression. RFC 2435 JPEG requires standard
+Huffman tables and its representable single scan; other input is rejected before
+output instead of silently changing decoded pixels.
+
+`build_native.py` selects only app, rtp, rtpmanager, srtp and dtls plugins into a
+private gst-full shared artifact. Filesystem registry/plugin scanning, pipeline
+parsing and native debug dumps are disabled. Native dependencies must still be
+bundled and relocated by platform packaging; the gst-full artifact alone is not
+a self-contained distribution.
+
+`tests/full_native.py` links the actual private artifact and tests RTSP, all seven
+payload formats, raw RTP, backpressure and joined stop. FFmpeg independently
+encodes the fixtures and decodes recovered H264/H265/JPEG for exact pixel checks.
+Optimized JPEG tables are a negative test. `IMAPIPE_MEDIA_PREFIX=<private-prefix>
+cargo test --manifest-path runtime/rust/Cargo.toml` checks the safe owner ABI,
+repeated extension headers, binary bodies and cancellation with raw evidence.
+
+These checks do not claim Runtime media transport, SRTP persistence, complete
+RTP/RTCP session behavior or platform packaging acceptance.

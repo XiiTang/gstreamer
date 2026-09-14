@@ -517,6 +517,8 @@ if building_full
   # Build shared library
   gstfull = build_target('gstreamer-full-1.0',
     init_static_plugins_c,
+    'runtime/gstruntimepayload.c',
+    'runtime/gstruntimeapi.c',
     c_args: ['-DBUILDING_GST'] + gst_c_args,
     target_type: get_option('gst-full-target-type'),
     link_args: gstfull_link_args,
