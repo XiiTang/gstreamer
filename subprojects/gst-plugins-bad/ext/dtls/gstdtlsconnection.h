@@ -120,6 +120,9 @@ void gst_dtls_connection_check_timeout(GstDtlsConnection *);
  * Stops the connections, it is not required to call this function.
  */
 void gst_dtls_connection_stop(GstDtlsConnection *);
+/* Exclusive owner shutdown, never from a connection callback. Unlike stop,
+ * joins timeout work even if a clock callback briefly holds another reference. */
+void gst_dtls_connection_stop_and_join(GstDtlsConnection *);
 
 /*
  * Closes the connection, the function will block until the connection has been stopped.

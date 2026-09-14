@@ -79,7 +79,7 @@ finalized (gpointer data, GObject *object)
 static void
 exchange (ServerIdentity *server_certificate, const char *profile, const char *server_profile,
           guint key_length, guint salt_length, gboolean trust, gboolean install_verifier,
-          guint8 *previous)
+          gboolean identity, guint8 *previous)
 {
   struct sockaddr_in client_address, server_address;
   Client client = { .root = server_certificate->root, .trust = trust };
@@ -99,6 +99,9 @@ exchange (ServerIdentity *server_certificate, const char *profile, const char *s
   g_assert_cmpint (SSL_CTX_use_PrivateKey (context, server_certificate->key), ==, 1);
   g_assert_cmpint (SSL_CTX_set_tlsext_use_srtp (context, server_profile), ==, 0);
   g_assert_cmpint (SSL_CTX_add1_chain_cert (context, server_certificate->intermediate), ==, 1);
+  g_assert_cmpint (X509_STORE_add_cert (SSL_CTX_get_cert_store (context), server_certificate->root),
+                   ==, 1);
+  SSL_CTX_set_verify (context, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
   SSL *server = SSL_new (context);
   BIO *bio = BIO_new_dgram (server_socket, BIO_NOCLOSE);
   BIO_ctrl (bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, &client_address);
@@ -106,8 +109,21 @@ exchange (ServerIdentity *server_certificate, const char *profile, const char *s
   SSL_set_accept_state (server);
   SSL_set_mtu (server, 1200);
   GstRuntimeDtls *connection = NULL;
-  int created = gst_runtime_dtls_create (NULL, profile, install_verifier ? verify_peer : NULL,
-                                         &client, &connection);
+  BIO *private_identity = BIO_new (BIO_s_mem ());
+  g_assert_cmpint (PEM_write_bio_X509 (private_identity, server_certificate->certificate), ==, 1);
+  g_assert_cmpint (PEM_write_bio_X509 (private_identity, server_certificate->intermediate), ==, 1);
+  g_assert_cmpint (PEM_write_bio_PrivateKey (private_identity, server_certificate->key, NULL, NULL,
+                                             0, NULL, NULL),
+                   ==, 1);
+  BUF_MEM *memory;
+  BIO_get_mem_ptr (private_identity, &memory);
+  gchar *pem = g_strndup (memory->data, memory->length);
+  int created = gst_runtime_dtls_create (
+      identity ? pem : NULL, profile, install_verifier ? verify_peer : NULL, &client, &connection);
+  OPENSSL_cleanse (pem, strlen (pem));
+  g_free (pem);
+  OPENSSL_cleanse (memory->data, memory->length);
+  BIO_free (private_identity);
   if (!install_verifier)
     {
       g_assert_cmpint (created, <, 0);
@@ -184,7 +200,7 @@ exchange (ServerIdentity *server_certificate, const char *profile, const char *s
       struct pollfd fds[2] = { { client.socket, POLLIN, 0 }, { server_socket, POLLIN, 0 } };
       poll (fds, 2, 2);
     }
-  gboolean success = trust && install_verifier && !strcmp (profile, server_profile);
+  gboolean success = trust && install_verifier && identity && !strcmp (profile, server_profile);
   if (success)
     {
       g_assert_false (failed);
@@ -286,15 +302,18 @@ main (int argc, char **argv)
       guint8 previous[45] = { 0 };
       for (guint repeat = 0; repeat < 2; repeat++)
         exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, TRUE,
-                  previous);
+                  TRUE, previous);
       exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], FALSE, TRUE,
-                previous);
-      exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, FALSE,
-                previous);
-      exchange (server, profiles[i], profiles[(i + 1) % 3], key_lengths[i], salt_lengths[i], TRUE,
                 TRUE, previous);
+      exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, FALSE,
+                TRUE, previous);
+      exchange (server, profiles[i], profiles[(i + 1) % 3], key_lengths[i], salt_lengths[i], TRUE,
+                TRUE, TRUE, previous);
+      exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, TRUE,
+                FALSE, previous);
       OPENSSL_cleanse (previous, sizeof (previous));
-      g_print ("PASS opaque DTLS %s: independent exporter, fresh keys, rejected identity, missing "
+      g_print ("PASS opaque DTLS %s: independent exporter, verified mTLS chain, missing client "
+               "identity rejection, fresh keys, rejected identity, missing "
                "verifier, profile mismatch, one-shot keys, joined stop\n",
                profiles[i]);
     }

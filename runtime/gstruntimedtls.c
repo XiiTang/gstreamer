@@ -269,8 +269,8 @@ gst_runtime_dtls_free (GstRuntimeDtls *self)
     return;
   if (self->connection)
     {
-      gst_dtls_connection_stop (self->connection);
-      g_object_unref (self->connection); /* Finalizer joins the native timeout pool. */
+      gst_dtls_connection_stop_and_join (self->connection);
+      g_object_unref (self->connection);
     }
   g_clear_object (&self->agent);
   g_clear_object (&self->certificate);
