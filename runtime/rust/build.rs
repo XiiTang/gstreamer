@@ -11,7 +11,7 @@ fn main() {
     );
     println!("cargo:rustc-link-search=native={}", lib.display());
     println!("cargo:rustc-link-lib=dylib=gstreamer-full-1.0");
-    println!("cargo:metadata=native-prefix={}", prefix.display());
+    println!("cargo::metadata=native_prefix={}", prefix.display());
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
     }
