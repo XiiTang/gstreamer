@@ -48,7 +48,9 @@ typedef struct _GstDtlsConnectionPrivate GstDtlsConnectionPrivate;
  * SRTP Cipher selected by the DTLS handshake, should match the enums in gstsrtp
  */
 typedef enum {
-    GST_DTLS_SRTP_CIPHER_AES_128_ICM = 1
+    GST_DTLS_SRTP_CIPHER_AES_128_ICM = 1,
+    GST_DTLS_SRTP_CIPHER_AES_128_GCM = 3,
+    GST_DTLS_SRTP_CIPHER_AES_256_GCM = 4
 } GstDtlsSrtpCipher;
 
 /**
@@ -59,11 +61,15 @@ typedef enum {
  * SRTP Auth selected by the DTLS handshake, should match the enums in gstsrtp
  */
 typedef enum {
+    GST_DTLS_SRTP_AUTH_NULL = 0,
     GST_DTLS_SRTP_AUTH_HMAC_SHA1_32 = 1,
     GST_DTLS_SRTP_AUTH_HMAC_SHA1_80 = 2
 } GstDtlsSrtpAuth;
 
-#define GST_DTLS_SRTP_MASTER_KEY_LENGTH 30
+/* Key storage is sized for the negotiated profile and cleansed on release. */
+GstBuffer *gst_dtls_srtp_key_buffer (gconstpointer key, guint length);
+/* Only callable before starting a new handshake. No fallback profiles. */
+gboolean gst_dtls_connection_set_srtp_profiles (GstDtlsConnection *, const gchar *);
 
 typedef enum
 {

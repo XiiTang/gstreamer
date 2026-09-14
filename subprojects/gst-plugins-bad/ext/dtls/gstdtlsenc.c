@@ -103,7 +103,7 @@ static void clear_signals (GstDtlsEnc *);
 static GstFlowReturn sink_chain (GstPad *, GstObject *, GstBuffer *);
 static gboolean sink_event (GstPad * pad, GstObject * parent, GstEvent * event);
 
-static void on_key_received (GstDtlsConnection *, gpointer key, guint cipher,
+static void on_key_received (GstDtlsConnection *, gpointer key, guint length, guint cipher,
     guint auth, GstDtlsEnc *);
 static gboolean on_send_data (GstDtlsConnection *, gconstpointer data,
     gsize length, GstDtlsEnc *);
@@ -155,7 +155,7 @@ gst_dtls_enc_class_init (GstDtlsEncClass * klass)
       "SRTP cipher",
       "The SRTP cipher selected in the DTLS handshake. "
       "The value will be set to an GstDtlsSrtpCipher.",
-      0, GST_DTLS_SRTP_CIPHER_AES_128_ICM, DEFAULT_SRTP_CIPHER,
+      0, GST_DTLS_SRTP_CIPHER_AES_256_GCM, DEFAULT_SRTP_CIPHER,
       G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
   properties[PROP_SRTP_AUTH] =
@@ -671,11 +671,10 @@ sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
 }
 
 static void
-on_key_received (GstDtlsConnection * connection, gpointer key, guint cipher,
+on_key_received (GstDtlsConnection * connection, gpointer key, guint length, guint cipher,
     guint auth, GstDtlsEnc * self)
 {
   GstBuffer *new_encoder_key;
-  gchar *key_str;
 
   g_return_if_fail (GST_IS_DTLS_ENC (self));
   g_return_if_fail (GST_IS_DTLS_CONNECTION (connection));
@@ -684,16 +683,13 @@ on_key_received (GstDtlsConnection * connection, gpointer key, guint cipher,
   self->srtp_auth = auth;
 
   new_encoder_key =
-      gst_buffer_new_memdup (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
+      gst_dtls_srtp_key_buffer (key, length);
 
   if (self->encoder_key)
     gst_buffer_unref (self->encoder_key);
 
   self->encoder_key = new_encoder_key;
 
-  key_str = g_base64_encode (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
-  GST_INFO_OBJECT (self, "received key: %s", key_str);
-  g_free (key_str);
 
   g_signal_emit (self, signals[SIGNAL_ON_KEY_RECEIVED], 0);
 }
