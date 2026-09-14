@@ -1,5 +1,6 @@
 #include "gstruntimertpsession.h"
 #include <gst/rtp/gstrtcpbuffer.h>
+#include <gst/rtp/gstrtpdefs.h>
 #include <string.h>
 static const guint8 rtp[]
     = { 0xb2, 0xe0, 0xff, 0xfe, 0, 0, 0,    1,    0, 0, 0, 7, 0, 0, 0, 10, 0, 0,
@@ -14,9 +15,24 @@ blocked_writer (gpointer data)
   g_assert_not_reached ();
 }
 int
-main (void)
+main (int argc, char **argv)
 {
   gst_init (NULL, NULL);
+  /* A request to send RTCP never silently enables an unnegotiated profile. */
+  GstElement *probe = gst_element_factory_make ("rtpsession", NULL);
+  GObject *engine = NULL;
+  g_object_get (probe, "internal-session", &engine, NULL);
+  for (int profile = GST_RTP_PROFILE_AVP; profile <= GST_RTP_PROFILE_SAVPF; profile++)
+    {
+      g_object_set (engine, "rtp-profile", profile, NULL);
+      gboolean scheduled = FALSE;
+      g_signal_emit_by_name (engine, "send-rtcp-full", GST_SECOND, &scheduled);
+      int actual = 0;
+      g_object_get (engine, "rtp-profile", &actual, NULL);
+      g_assert_cmpint (actual, ==, profile);
+    }
+  g_object_unref (engine);
+  gst_object_unref (probe);
   GstRuntimeRtpSettings settings = { 7, 96, 90000, 0, 10 * GST_MSECOND, TRUE, TRUE };
   settings.bandwidth_bps = 128000;
   GstRuntimeRtpSession *a = gst_runtime_rtp_session_new (&settings);
@@ -47,7 +63,10 @@ main (void)
   while (blocks == 0)
     {
       g_assert_cmpint (g_get_monotonic_time (), <, report_deadline);
-      gst_runtime_rtp_session_report (b, GST_SECOND);
+      /* Repeated early requests must not starve an already-due regular report.
+       * The periodic variant also checks the native autonomous schedule. */
+      if (argc == 1 || strcmp (argv[1], "periodic"))
+        gst_runtime_rtp_session_report (b, GST_SECOND);
       int result = gst_runtime_rtp_session_read (b, 2, buffer, sizeof (buffer), &length,
                                                  100 * GST_MSECOND);
       if (result == 1)

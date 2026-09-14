@@ -10,6 +10,7 @@ registry=a.output/'must-not-create-registry.bin'
 env.update(GST_PLUGIN_PATH_1_0='/nonexistent/forbidden',GST_PLUGIN_SYSTEM_PATH_1_0='/nonexistent/forbidden',GST_REGISTRY_1_0=str(registry),GST_DEBUG='9')
 subprocess.run([str(a.output/'rtsp_transport')],env=env,check=True)
 subprocess.run([str(a.output/'rtp_session')],env=env,check=True)
+subprocess.run([str(a.output/'rtp_session'),'periodic'],env=env,check=True)
 common=['ffmpeg','-v','error','-y','-f','lavfi','-i','color=c=black:s=64x64:r=1','-frames:v','1','-an']
 subprocess.run([*common,'-c:v','libx264','-preset','ultrafast','-tune','zerolatency','-f','h264',str(a.output/'h264')],check=True)
 subprocess.run([*common,'-c:v','libx265','-x265-params','pools=1:frame-threads=1:log-level=error','-f','hevc',str(a.output/'h265')],check=True)
