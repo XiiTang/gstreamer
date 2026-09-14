@@ -20,9 +20,16 @@ GST_API int gst_runtime_sdp_media (GstRuntimeSdp *description, guint index,
                                    GstRuntimeSdpMedia *view);
 GST_API int gst_runtime_sdp_field (GstRuntimeSdp *description, guint index,
                                    GstRuntimeSdpField *view);
-/* Native caps are metadata only: never pipeline text or a remote connection. */
+typedef struct
+{
+  const char *name, *text;
+  gint64 number;
+  int type;
+} GstRuntimeSdpParameter;
 GST_API int gst_runtime_sdp_format (GstRuntimeSdp *description, guint media, guint format,
-                                    const char **name, const char **caps);
+                                    const char **name);
+GST_API int gst_runtime_sdp_parameter (GstRuntimeSdp *description, guint media, guint format,
+                                       guint index, GstRuntimeSdpParameter *view);
 GST_API int gst_runtime_sdp_control (GstRuntimeSdp *description, int media, const char *base,
                                      char **result);
 GST_API void gst_runtime_sdp_text_free (char *text);
