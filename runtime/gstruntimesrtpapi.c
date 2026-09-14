@@ -22,10 +22,10 @@ gst_runtime_srtp_export (srtp_runtime_context *context, guint8 *output, gsize *l
   return srtp_runtime_export (context, output, length);
 }
 int
-gst_runtime_srtp_packet (srtp_runtime_context *context, int rtcp, guint8 *packet, gsize capacity,
+gst_runtime_srtp_packet (srtp_runtime_context *context, int sending, int rtcp, guint8 *packet, gsize capacity,
                          gsize *length)
 {
-  return srtp_runtime_packet (context, rtcp, packet, capacity, length);
+  return srtp_runtime_packet (context, sending, rtcp, packet, capacity, length);
 }
 void
 gst_runtime_srtp_free (srtp_runtime_context *context)

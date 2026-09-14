@@ -24,6 +24,7 @@ impl Profile {
 pub enum Direction {
     Send = 1,
     Receive = 2,
+    Both = 3,
 }
 #[derive(Clone, Copy)]
 pub struct Configuration<'a> {
@@ -71,6 +72,7 @@ unsafe extern "C" {
     fn gst_runtime_srtp_export(context: *mut c_void, output: *mut u8, length: *mut usize) -> i32;
     fn gst_runtime_srtp_packet(
         context: *mut c_void,
+        sending: i32,
         rtcp: i32,
         packet: *mut u8,
         capacity: usize,
@@ -139,7 +141,13 @@ impl Context {
     }
     /// Returns processed bytes only on success. No persistence or network I/O.
     /// A failed native call may consume state; export that state or retire owner.
-    pub fn packet(&mut self, rtcp: bool, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    pub fn protect(&mut self, rtcp: bool, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+        self.packet(true, rtcp, bytes)
+    }
+    pub fn unprotect(&mut self, rtcp: bool, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+        self.packet(false, rtcp, bytes)
+    }
+    fn packet(&mut self, sending: bool, rtcp: bool, bytes: &[u8]) -> Result<Vec<u8>, Error> {
         let capacity = bytes.len().checked_add(32).ok_or(Error::INVALID)?;
         if capacity > i32::MAX as usize {
             return Err(Error::INVALID);
@@ -152,6 +160,7 @@ impl Context {
         let status = unsafe {
             gst_runtime_srtp_packet(
                 self.raw.as_ptr(),
+                i32::from(sending),
                 i32::from(rtcp),
                 packet.as_mut_ptr(),
                 capacity,
@@ -199,21 +208,21 @@ mod tests {
                 (false, vec![128, 96, 255, 255, 0, 0, 0, 1, 0, 0, 0, 7, 9]),
                 (true, vec![128, 201, 0, 1, 0, 0, 0, 7]),
             ] {
-                let wire = tx.packet(rtcp, &packet).unwrap();
-                assert_eq!(rx.packet(rtcp, &wire).unwrap(), packet);
+                let wire = tx.protect(rtcp, &packet).unwrap();
+                assert_eq!(rx.unprotect(rtcp, &wire).unwrap(), packet);
                 tx = Context::restore(send, &tx.export().unwrap()).unwrap();
                 rx = Context::restore(receive, &rx.export().unwrap()).unwrap();
-                assert_eq!(rx.packet(rtcp, &wire).unwrap_err(), Error::REPLAY);
+                assert_eq!(rx.unprotect(rtcp, &wire).unwrap_err(), Error::REPLAY);
             }
             assert_eq!(
-                tx.packet(false, &[128, 96, 255, 255, 0, 0, 0, 1, 0, 0, 0, 7, 9])
+                tx.protect(false, &[128, 96, 255, 255, 0, 0, 0, 1, 0, 0, 0, 7, 9])
                     .unwrap_err(),
                 Error::REPLAY
             );
             let wire = tx
-                .packet(false, &[128, 96, 0, 0, 0, 0, 0, 2, 0, 0, 0, 7, 8])
+                .protect(false, &[128, 96, 0, 0, 0, 0, 0, 2, 0, 0, 0, 7, 8])
                 .unwrap();
-            assert_eq!(rx.packet(false, &wire).unwrap()[12], 8);
+            assert_eq!(rx.unprotect(false, &wire).unwrap()[12], 8);
         }
     }
 }
