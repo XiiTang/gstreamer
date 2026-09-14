@@ -213,14 +213,9 @@ gst_rtsp_runtime_client_request (GstRTSPRuntimeClient *client, GstRTSPMessage *r
     }
   return result;
 }
-GstRTSPResult
-gst_rtsp_runtime_client_receive (GstRTSPRuntimeClient *client, GstRTSPMessage *message,
-                                 gint64 timeout)
+static GstRTSPResult
+receive_result (GstRTSPRuntimeClient *client, GstRTSPMessage *message, GstRTSPResult result)
 {
-  g_return_val_if_fail (client && message, GST_RTSP_EINVAL);
-  if (client->unknown)
-    return GST_RTSP_EINVAL;
-  GstRTSPResult result = gst_rtsp_connection_receive_usec (client->connection, message, timeout);
   if (result != GST_RTSP_OK)
     return unknown (client, result);
   if (message->type == GST_RTSP_MESSAGE_DATA)
@@ -346,6 +341,21 @@ gst_rtsp_runtime_client_receive (GstRTSPRuntimeClient *client, GstRTSPMessage *m
   client->dispatch = GST_RTSP_RUNTIME_RESPONSE_RECEIVED;
   pending_clear (client);
   return GST_RTSP_OK;
+}
+GstRTSPResult
+gst_rtsp_runtime_client_receive (GstRTSPRuntimeClient *client, GstRTSPMessage *message,
+                                 gint64 timeout)
+{
+  g_return_val_if_fail (client && message && !client->unknown, GST_RTSP_EINVAL);
+  return receive_result (client, message,
+                         gst_rtsp_connection_receive_usec (client->connection, message, timeout));
+}
+int
+gst_rtsp_runtime_client_receive_step (GstRTSPRuntimeClient *client, GstRTSPMessage *message)
+{
+  g_return_val_if_fail (client && message && !client->unknown, GST_RTSP_EINVAL);
+  int result = gst_rtsp_connection_receive_step (client->connection, message);
+  return result == 1 ? 1 : receive_result (client, message, result);
 }
 GstRTSPResult
 gst_rtsp_runtime_client_respond (GstRTSPRuntimeClient *client, GstRTSPMessage *response,

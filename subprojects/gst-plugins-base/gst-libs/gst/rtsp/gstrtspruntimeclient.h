@@ -56,6 +56,8 @@ const GstRTSPTransport *gst_rtsp_runtime_client_track_transport (GstRTSPRuntimeC
 GST_RTSP_API
 guint64 gst_rtsp_runtime_client_track_generation (GstRTSPRuntimeClient *client,
                                                   const gchar *session, const gchar *uri);
+GST_RTSP_API
+int gst_rtsp_runtime_client_receive_step (GstRTSPRuntimeClient *client, GstRTSPMessage *message);
 /* Cancellation is the only operation allowed concurrently with receive/write.
  * The owner must join those operations before free. Neither sends TEARDOWN. */
 GST_RTSP_API

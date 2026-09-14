@@ -133,6 +133,16 @@ gst_runtime_rtsp_receive (GstRuntimeRtsp *client, gint64 timeout, GstRuntimeRtsp
   *output = message;
   return result;
 }
+int
+gst_runtime_rtsp_receive_step (GstRuntimeRtsp *client, GstRuntimeRtspMessage **output)
+{
+  GstRuntimeRtspMessage *message = g_new0 (GstRuntimeRtspMessage, 1);
+  int result = gst_rtsp_runtime_client_receive_step (client->client, &message->message);
+  if (result != 1)
+    message->raw = gst_rtsp_runtime_client_received_bytes (client->client);
+  *output = message;
+  return result;
+}
 void
 gst_runtime_rtsp_message_view (GstRuntimeRtspMessage *message, GstRuntimeRtspMessageView *view)
 {

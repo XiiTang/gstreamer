@@ -407,6 +407,11 @@ G_GNUC_END_IGNORE_DEPRECATIONS
 
 #endif /* GST_DISABLE_DEPRECATED */
 
+/* Runtime supplied streams only: one nonblocking native parser step.
+ * Returns 1 while partial, 0 for a complete message, negative on failure. */
+GST_RTSP_API
+int gst_rtsp_connection_receive_step (GstRTSPConnection *conn, GstRTSPMessage *message);
+
 G_END_DECLS
 
 #endif /* __GST_RTSP_CONNECTION_H__ */

@@ -180,3 +180,43 @@ fn overlapping_interleaved_channels_cannot_bind_a_sibling_track() {
         }
     }
 }
+
+#[test]
+fn native_incremental_reader_preserves_every_fragment_and_cancel_evidence() {
+    for wire in [
+        b"RTSP/2.0 200 OK\r\nCSeq: 1\r\nX-Test: held\r\nContent-Length: 3\r\n\r\n\0\xff\x01"
+            .as_slice(),
+        b"$\x03\0\x03\0\xff\x01".as_slice(),
+    ] {
+        let (stream, mut server) = UnixStream::pair().unwrap();
+        let mut client = Rtsp::from_stream(stream.into(), URI, Version::V2, 4096).unwrap();
+        client.request("OPTIONS", URI, &[], &[], SECOND).0.unwrap();
+        request(&mut server);
+        for (index, byte) in wire.iter().enumerate() {
+            server.write_all(&[*byte]).unwrap();
+            let start = Instant::now();
+            let (result, message) = client.receive_step();
+            assert!(start.elapsed() < Duration::from_millis(100));
+            if index + 1 == wire.len() {
+                assert!(result.unwrap());
+                assert_eq!(message.raw, wire);
+                assert_eq!(message.body, [0, 255, 1]);
+            } else {
+                assert!(!result.unwrap());
+                assert!(message.raw.is_empty());
+                assert!(client.state("s", URI).unwrap().is_none());
+            }
+        }
+    }
+    let (stream, mut server) = UnixStream::pair().unwrap();
+    let mut client = Rtsp::from_stream(stream.into(), URI, Version::V2, 4096).unwrap();
+    client.request("OPTIONS", URI, &[], &[], SECOND).0.unwrap();
+    request(&mut server);
+    let partial = b"RTSP/2.0 200 OK\r\nCSeq: 1\r\nContent-Length: 99\r\n\r\npartial";
+    server.write_all(partial).unwrap();
+    assert!(!client.receive_step().0.unwrap());
+    client.cancellation().cancel();
+    let (result, message) = client.receive_step();
+    assert_eq!(result, Err(Error::CANCELLED));
+    assert_eq!(message.raw, partial);
+}

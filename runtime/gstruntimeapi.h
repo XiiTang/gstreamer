@@ -55,6 +55,8 @@ GST_API
 int gst_runtime_rtsp_receive (GstRuntimeRtsp *client, gint64 timeout,
                               GstRuntimeRtspMessage **result);
 GST_API
+int gst_runtime_rtsp_receive_step (GstRuntimeRtsp *client, GstRuntimeRtspMessage **result);
+GST_API
 void gst_runtime_rtsp_message_view (GstRuntimeRtspMessage *message,
                                     GstRuntimeRtspMessageView *view);
 GST_API
