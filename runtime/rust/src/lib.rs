@@ -2,6 +2,7 @@
 //! protocol transitions and media engines remain in the native library.
 mod ffi;
 pub mod payload;
+pub mod rtp;
 pub mod rtsp;
 pub mod srtp;
 use std::sync::Once;

@@ -62,3 +62,19 @@ repeated extension headers, binary bodies and cancellation with raw evidence.
 
 These checks do not claim Runtime media transport, SRTP persistence, complete
 RTP/RTCP session behavior or platform packaging acceptance.
+
+## Shared RTP session and SRTP state
+
+`gstruntimertpsession` wraps the native `rtpsession` engine on bounded appsrc/
+appsink ports. It preserves raw RTP fields, checks declared outbound SSRC/PT,
+exposes native source statistics, and emits RTCP reports only when enabled.
+Nonblocking admission lets one Runtime actor continue draining all output ports
+while a native input queue is full. Stop joins native tasks without injecting EOS
+or BYE. Direct RTP and RTSP tracks use this same owner. Feedback/RTX and Runtime
+transport integration have separate acceptance gates.
+
+`gstruntimesrtpapi` and `rust::srtp` own the complete versioned libSRTP state.
+`native-lock.json` pins the patched library; `build_native.py --srtp-prefix ...`
+checks its committed source and artifact hashes before building. Every Runtime
+packet must commit encrypted state before sending ciphertext or delivering
+verified plaintext. Native/Rust tests do not replace Runtime crash/lease tests.
