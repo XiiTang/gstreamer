@@ -150,6 +150,8 @@ typedef enum
 
 #define TUNNELID_LEN   24
 
+typedef struct _GstRTSPBuilder GstRTSPBuilder;
+
 struct _GstRTSPConnection
 {
   /*< private > */
@@ -163,6 +165,8 @@ struct _GstRTSPConnection
   gsize written_bytes;
   guint capture_limit;
   gboolean capturing;
+  GstRTSPBuilder *runtime_builder;
+  GstRTSPMessage *runtime_message;
   GSocketClient *client;
   GIOStream *stream0;
   GIOStream *stream1;
@@ -251,7 +255,7 @@ enum
 };
 
 /* a structure for constructing RTSPMessages */
-typedef struct
+struct _GstRTSPBuilder
 {
   gint state;
   GstRTSPResult status;
@@ -261,7 +265,7 @@ typedef struct
   guint line;
   guint8 *body_data;
   guint body_len;
-} GstRTSPBuilder;
+};
 
 /* function prototypes */
 static void add_auth_header (GstRTSPConnection * conn,
@@ -3041,6 +3045,37 @@ no_message:
   }
 }
 
+/* A native incremental reader using the same builder as GstRTSPWatch.
+ * 1 means that the caller should service other work and poll again. */
+int
+gst_rtsp_connection_receive_step (GstRTSPConnection *conn, GstRTSPMessage *message)
+{
+  g_return_val_if_fail (conn && conn->runtime_io && conn->manual_http && message,
+      GST_RTSP_EINVAL);
+  if (!conn->runtime_builder) {
+    conn->runtime_builder = g_new0 (GstRTSPBuilder, 1);
+    conn->runtime_message = g_new0 (GstRTSPMessage, 1);
+    g_byte_array_set_size (conn->received_bytes, 0);
+  }
+  GCancellable *cancellable = get_cancellable (conn);
+  GstRTSPResult result;
+  if (g_cancellable_is_cancelled (cancellable)) result = GST_RTSP_EINTR;
+  else {
+    conn->capturing = TRUE;
+    result = build_next (conn->runtime_builder, conn->runtime_message, conn, FALSE);
+    conn->capturing = FALSE;
+  }
+  gboolean pending = result == GST_RTSP_EINTR && !g_cancellable_is_cancelled (cancellable);
+  g_object_unref (cancellable);
+  if (pending) return 1;
+  gst_rtsp_message_unset (message);
+  *message = *conn->runtime_message;
+  g_clear_pointer (&conn->runtime_message, g_free);
+  build_reset (conn->runtime_builder);
+  g_clear_pointer (&conn->runtime_builder, g_free);
+  return result;
+}
+
 /**
  * gst_rtsp_connection_receive_usec:
  * @conn: a #GstRTSPConnection
@@ -3068,6 +3103,8 @@ gst_rtsp_connection_receive_usec (GstRTSPConnection * conn,
   g_return_val_if_fail (message != NULL, GST_RTSP_EINVAL);
   g_return_val_if_fail (conn->read_socket != NULL, GST_RTSP_EINVAL);
 
+  /* Do not discard an incremental reader's partial message. */
+  if (conn->runtime_builder) return GST_RTSP_EINVAL;
   /* configure timeout if any */
   set_read_socket_timeout (conn, timeout);
 
@@ -3225,6 +3262,11 @@ gst_rtsp_connection_free (GstRTSPConnection * conn)
     conn->
         accept_certificate_destroy_notify (conn->accept_certificate_user_data);
 
+  if (conn->runtime_builder) {
+    build_reset (conn->runtime_builder);
+    g_free (conn->runtime_builder);
+  }
+  if (conn->runtime_message) gst_rtsp_message_free (conn->runtime_message);
   g_clear_pointer (&conn->received_bytes, g_byte_array_unref);
   g_timer_destroy (conn->timer);
   gst_rtsp_url_free (conn->url);

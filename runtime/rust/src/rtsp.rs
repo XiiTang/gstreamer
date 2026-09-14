@@ -258,6 +258,20 @@ impl Rtsp {
         let message = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
         (result, message.copy())
     }
+    /// False means a retained partial message. No partial event is published;
+    /// the next complete message or terminal error includes its exact raw bytes.
+    pub fn receive_step(&mut self) -> (Result<bool, Error>, Message) {
+        let mut message = std::ptr::null_mut();
+        let code =
+            unsafe { ffi::gst_runtime_rtsp_receive_step(self.inner.0.as_ptr(), &mut message) };
+        let result = if code == 1 {
+            Ok(false)
+        } else {
+            Error::check(code).map(|_| true)
+        };
+        let message = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
+        (result, message.copy())
+    }
     pub fn transport(&mut self, session: &str, uri: &str) -> Result<Option<Transport>, Error> {
         let session = text(session)?;
         let uri = text(uri)?;
