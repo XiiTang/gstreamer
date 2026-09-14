@@ -20,6 +20,7 @@ typedef struct
   gboolean reorder;
   guint32 latency_ms;
   double bandwidth_bps;
+  const GstCaps *negotiated_caps;
 } GstRuntimeRtpSettings;
 /* One transport RTP session. The same owner is used by direct RTP and a
  * negotiated RTSP track. No sockets, keys, encoders, or arbitrary pipelines. */

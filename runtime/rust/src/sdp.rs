@@ -308,3 +308,77 @@ mod tests {
         );
     }
 }
+
+/// A native, validated selection. It cannot contain an arbitrary pipeline or
+/// caller-supplied caps string; construction always passes through the SDP parser.
+pub struct Selection(NonNull<c_void>);
+// Selection owns an immutable GstCaps value, whose references are atomic. No
+// caller can mutate it; native session construction takes its own caps copy.
+unsafe impl Send for Selection {}
+unsafe impl Sync for Selection {}
+/// The already negotiated RTSP track. SDP never initiates a connection.
+pub struct Track<'a> {
+    pub media: u32,
+    pub base_uri: &'a str,
+    pub uri: &'a str,
+    pub profile: &'a str,
+    pub lower_transport: &'a str,
+    pub record: bool,
+}
+impl Drop for Selection {
+    fn drop(&mut self) {
+        unsafe { gst_runtime_sdp_selection_free(self.0.as_ptr()) };
+    }
+}
+impl Selection {
+    pub(crate) fn as_ptr(&self) -> *const c_void {
+        self.0.as_ptr()
+    }
+    pub fn new(
+        bytes: &[u8],
+        track: Track<'_>,
+        configuration: &crate::rtp::Configuration<'_>,
+    ) -> Result<Self, Error> {
+        crate::initialize();
+        let base = CString::new(track.base_uri).map_err(|_| Error::INVALID)?;
+        let uri = CString::new(track.uri).map_err(|_| Error::INVALID)?;
+        let profile = CString::new(track.profile).map_err(|_| Error::INVALID)?;
+        let lower = CString::new(track.lower_transport).map_err(|_| Error::INVALID)?;
+        let mut description = std::ptr::null_mut();
+        Error::check(unsafe {
+            gst_runtime_sdp_new(bytes.as_ptr(), bytes.len(), &mut description)
+        })?;
+        let owned = Owned(NonNull::new(description).ok_or(Error::INVALID)?);
+        let mut selected = std::ptr::null_mut();
+        let code = crate::rtp::with_settings(configuration, |settings| unsafe {
+            gst_runtime_sdp_select(
+                owned.0.as_ptr(),
+                track.media,
+                base.as_ptr(),
+                uri.as_ptr(),
+                profile.as_ptr(),
+                lower.as_ptr(),
+                i32::from(track.record),
+                settings,
+                &mut selected,
+            )
+        })
+        .map_err(|_| Error::INVALID)?;
+        Error::check(code)?;
+        Ok(Self(NonNull::new(selected).ok_or(Error::INVALID)?))
+    }
+}
+unsafe extern "C" {
+    fn gst_runtime_sdp_select(
+        description: *mut c_void,
+        media: u32,
+        base: *const c_char,
+        uri: *const c_char,
+        profile: *const c_char,
+        lower_transport: *const c_char,
+        record: i32,
+        settings: *const crate::rtp::Settings,
+        selected: *mut *mut c_void,
+    ) -> i32;
+    fn gst_runtime_sdp_selection_free(selection: *mut c_void);
+}

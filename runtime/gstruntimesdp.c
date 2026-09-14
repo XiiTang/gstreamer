@@ -463,7 +463,9 @@ gst_runtime_sdp_control (GstRuntimeSdp *s, int media, const char *base, char **r
         }
     }
   if (!control)
-    return 0;
+    return media == 0 && gst_runtime_sdp_media_count (s) == 1
+               ? gst_runtime_sdp_control (s, -1, base, result)
+               : 0;
   if (!strcmp (control, "*"))
     *result = g_strdup (base);
   else
@@ -479,4 +481,187 @@ void
 gst_runtime_sdp_text_free (char *text)
 {
   g_free (text);
+}
+
+static GstCaps *
+payload_caps (GstRuntimeSdp *s, guint media, guint pt)
+{
+  const GstSDPMedia *m = gst_sdp_message_get_media (s->message, media);
+  for (guint i = 0; i < gst_sdp_media_formats_len (m); i++)
+    {
+      const gchar *name = gst_sdp_media_get_format (m, i);
+      if (decimal (name, 127) && (guint)atoi (name) == pt)
+        return format_caps (s, media, i);
+    }
+  return NULL;
+}
+static gboolean
+number_field (const GstStructure *s, const gchar *name, guint64 expected, gboolean optional)
+{
+  const GValue *v = gst_structure_get_value (s, name);
+  if (!v)
+    return optional;
+  if (G_VALUE_HOLDS_INT (v))
+    return g_value_get_int (v) >= 0 && (guint64)g_value_get_int (v) == expected;
+  if (!G_VALUE_HOLDS_STRING (v))
+    return FALSE;
+  const gchar *text = g_value_get_string (v);
+  return decimal (text, G_MAXUINT64) && g_ascii_strtoull (text, NULL, 10) == expected;
+}
+static gboolean
+feedback_field (const GstStructure *s, const gchar *name)
+{
+  gboolean enabled = FALSE;
+  return gst_structure_get_boolean (s, name, &enabled) && enabled;
+}
+/* RTSP descriptions express direction from the client's perspective. */
+static gboolean
+direction_matches (GstRuntimeSdp *s, guint media, gboolean record)
+{
+  int inherited = 3, local = 0;
+  gboolean session_seen = FALSE;
+  for (guint i = 0; i < s->fields->len; i++)
+    {
+      Field *f = &g_array_index (s->fields, Field, i);
+      if (f->type != 'a' || (f->scope != -1 && f->scope != (int)media))
+        continue;
+      int direction = !strcmp (f->value, "sendonly")   ? 1
+                      : !strcmp (f->value, "recvonly") ? 2
+                      : !strcmp (f->value, "sendrecv") ? 3
+                      : !strcmp (f->value, "inactive") ? 4
+                                                       : 0;
+      if (!direction)
+        continue;
+      if (f->scope == -1)
+        {
+          if (session_seen)
+            return FALSE;
+          session_seen = TRUE;
+          inherited = direction;
+        }
+      else
+        {
+          if (local)
+            return FALSE;
+          local = direction;
+        }
+    }
+  return ((local ? local : inherited) & (record ? 1 : 2)) != 0;
+}
+int
+gst_runtime_sdp_select (GstRuntimeSdp *s, guint media, const gchar *base, const gchar *uri,
+                        const gchar *profile, const gchar *lower, gboolean record,
+                        const GstRuntimeRtpSettings *settings, GstCaps **selected)
+{
+  if (!s || !settings || !selected || !base || !uri || !profile || !lower
+      || media >= gst_runtime_sdp_media_count (s))
+    return -2;
+  *selected = NULL;
+  const GstSDPMedia *m = gst_sdp_message_get_media (s->message, media);
+  gchar *protocol = g_strdup_printf ("RTP/%s", profile);
+  gchar *suffix = g_ascii_strup (lower, -1);
+  gchar *full = g_strdup_printf ("%s/%s", protocol, suffix);
+  gboolean valid = (!strcmp (lower, "tcp") || !strcmp (lower, "udp"))
+                   && (!g_strcmp0 (gst_sdp_media_get_proto (m), protocol)
+                       || !g_strcmp0 (gst_sdp_media_get_proto (m), full))
+                   && direction_matches (s, media, record);
+  g_free (full);
+  g_free (suffix);
+  g_free (protocol);
+  gchar *control = NULL;
+  valid = valid && gst_runtime_sdp_control (s, media, base, &control) == 0 && control
+          && !strcmp (control, uri);
+  g_free (control);
+  GstCaps *caps = payload_caps (s, media, settings->payload_type);
+  if (!valid || !caps || !gst_caps_is_fixed (caps))
+    return -2;
+  const GstStructure *actual = gst_caps_get_structure (caps, 0);
+  if (!number_field (actual, "clock-rate", settings->clock_rate, FALSE))
+    return -2;
+  if (((settings->feedback & 1) && !feedback_field (actual, "rtcp-fb-nack"))
+      || ((settings->feedback & 2) && !feedback_field (actual, "rtcp-fb-nack-pli"))
+      || ((settings->feedback & 4) && !feedback_field (actual, "rtcp-fb-ccm-fir")))
+    return -2;
+  if (settings->rtx)
+    {
+      GstCaps *rtx = payload_caps (s, media, settings->rtx->payload_type);
+      if (!rtx || !gst_caps_is_fixed (rtx))
+        return -2;
+      const GstStructure *rtx_s = gst_caps_get_structure (rtx, 0);
+      if (g_ascii_strcasecmp (gst_structure_get_string (rtx_s, "encoding-name")
+                                  ? gst_structure_get_string (rtx_s, "encoding-name")
+                                  : "",
+                              "RTX")
+          || !number_field (rtx_s, "apt", settings->payload_type, FALSE)
+          || !number_field (rtx_s, "clock-rate", settings->clock_rate, FALSE))
+        return -2;
+    }
+  GstCaps *result = gst_caps_copy (caps);
+  gst_structure_set_name (gst_caps_get_structure (result, 0), "application/x-rtp");
+  GstStructure *normalized = gst_caps_get_structure (result, 0);
+  const gchar *hex_fields[] = { "config", "profile-level-id" };
+  for (guint i = 0; i < G_N_ELEMENTS (hex_fields); i++)
+    {
+      const gchar *value = gst_structure_get_string (normalized, hex_fields[i]);
+      if (!value)
+        continue;
+      gchar *lowercase = g_ascii_strdown (value, -1);
+      gst_structure_set (normalized, hex_fields[i], G_TYPE_STRING, lowercase, NULL);
+      g_free (lowercase);
+    }
+  const gchar *numbers[]
+      = { "packetization-mode", "encoding-params",  "streamtype",        "sizelength",
+          "indexlength",        "indexdeltalength", "sprop-max-don-diff" };
+  for (guint i = 0; i < G_N_ELEMENTS (numbers); i++)
+    {
+      const gchar *value = gst_structure_get_string (normalized, numbers[i]);
+      if (!value || !decimal (value, G_MAXUINT64))
+        continue;
+      gchar *canonical = g_strdup_printf ("%" G_GUINT64_FORMAT, g_ascii_strtoull (value, NULL, 10));
+      gst_structure_set (normalized, numbers[i], G_TYPE_STRING, canonical, NULL);
+      g_free (canonical);
+    }
+  if (settings->payload && settings->payload->format != GST_RUNTIME_PAYLOAD_RAW)
+    {
+      GstRuntimePayloadSettings codec = *settings->payload;
+      codec.sending = FALSE;
+      GstCaps *declared = gst_runtime_payload_caps (&codec);
+      if (!declared)
+        {
+          gst_caps_unref (result);
+          return -2;
+        }
+      /* This backend emits H264 non-interleaved packets and AAC-hbr AU headers.
+       * Missing H264 packetization-mode means mode 0, not a wildcard for mode 1. */
+      valid = gst_caps_can_intersect (declared, result);
+      if (codec.format == GST_RUNTIME_PAYLOAD_H264)
+        valid = valid && number_field (actual, "packetization-mode", 1, FALSE);
+      if (codec.format == GST_RUNTIME_PAYLOAD_H265)
+        valid = valid && number_field (actual, "sprop-max-don-diff", 0, TRUE);
+      if (codec.format == GST_RUNTIME_PAYLOAD_OPUS)
+        valid = valid && number_field (actual, "encoding-params", 2, FALSE);
+      if (codec.format == GST_RUNTIME_PAYLOAD_AAC)
+        valid = valid
+                && number_field (actual, "encoding-params", codec.channels, codec.channels == 1)
+                && gst_structure_get_string (actual, "config")
+                && gst_structure_get_string (actual, "mode")
+                && number_field (actual, "streamtype", 5, FALSE)
+                && number_field (actual, "sizelength", 13, FALSE)
+                && number_field (actual, "indexlength", 3, FALSE)
+                && number_field (actual, "indexdeltalength", 3, FALSE);
+      gst_caps_unref (declared);
+      if (!valid)
+        {
+          gst_caps_unref (result);
+          return -2;
+        }
+    }
+  *selected = result;
+  return 0;
+}
+void
+gst_runtime_sdp_selection_free (GstCaps *selection)
+{
+  if (selection)
+    gst_caps_unref (selection);
 }

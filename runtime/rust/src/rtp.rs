@@ -19,6 +19,7 @@ pub struct Configuration<'a> {
     pub bandwidth_bps: Option<u64>,
     pub payload: Option<&'a crate::payload::Configuration<'a>>,
     pub reorder_latency: Option<Duration>,
+    pub negotiated: Option<&'a crate::sdp::Selection>,
 }
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -74,7 +75,7 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 #[repr(C)]
-struct Settings {
+pub(crate) struct Settings {
     ssrc: u32,
     payload_type: u32,
     clock_rate: u32,
@@ -87,6 +88,7 @@ struct Settings {
     reorder: i32,
     latency_ms: u32,
     bandwidth_bps: f64,
+    negotiated_caps: *const c_void,
 }
 unsafe extern "C" {
     fn gst_runtime_rtp_session_new(settings: *const Settings) -> *mut c_void;
@@ -148,42 +150,54 @@ impl Drop for Session {
         self.cancellation().cancel();
     }
 }
+pub(crate) fn with_settings<T>(
+    c: &Configuration<'_>,
+    apply: impl FnOnce(&Settings) -> T,
+) -> Result<T, Error> {
+    let mut settings = Settings {
+        ssrc: c.ssrc,
+        payload_type: c.payload_type.into(),
+        clock_rate: c.clock_rate,
+        probation: c.probation,
+        rtcp_min_interval: c
+            .reports
+            .map_or(Ok(0), |v| u64::try_from(v.as_nanos()))
+            .map_err(|_| Error(-5))?,
+        reports: i32::from(c.reports.is_some()),
+        feedback: c.feedback.map_or(0, |f| {
+            u32::from(f.nack) | (u32::from(f.pli) << 1) | (u32::from(f.fir) << 2)
+        }),
+        rtx: c
+            .feedback
+            .and_then(|f| f.rtx.as_ref())
+            .map_or(std::ptr::null(), |r| r),
+        bandwidth_bps: c.bandwidth_bps.unwrap_or(0) as f64,
+        negotiated_caps: c
+            .negotiated
+            .map_or(std::ptr::null(), |selection| selection.as_ptr()),
+        payload: std::ptr::null(),
+        reorder: i32::from(c.reorder_latency.is_some()),
+        latency_ms: c
+            .reorder_latency
+            .map_or(Ok(0), |d| u32::try_from(d.as_millis()))
+            .map_err(|_| Error(-5))?,
+    };
+    let result = match c.payload {
+        Some(payload) => crate::payload::with_settings(payload, |native| {
+            settings.payload = native;
+            apply(&settings)
+        })
+        .map_err(|_| Error(-5))?,
+        None => apply(&settings),
+    };
+    Ok(result)
+}
 impl Session {
     pub fn new(c: Configuration<'_>) -> Result<Self, Error> {
         crate::initialize();
-        let mut settings = Settings {
-            ssrc: c.ssrc,
-            payload_type: c.payload_type.into(),
-            clock_rate: c.clock_rate,
-            probation: c.probation,
-            rtcp_min_interval: c
-                .reports
-                .map_or(Ok(0), |v| u64::try_from(v.as_nanos()))
-                .map_err(|_| Error(-5))?,
-            reports: i32::from(c.reports.is_some()),
-            feedback: c.feedback.map_or(0, |f| {
-                u32::from(f.nack) | (u32::from(f.pli) << 1) | (u32::from(f.fir) << 2)
-            }),
-            rtx: c
-                .feedback
-                .and_then(|f| f.rtx.as_ref())
-                .map_or(std::ptr::null(), |r| r),
-            bandwidth_bps: c.bandwidth_bps.unwrap_or(0) as f64,
-            payload: std::ptr::null(),
-            reorder: i32::from(c.reorder_latency.is_some()),
-            latency_ms: c
-                .reorder_latency
-                .map_or(Ok(0), |d| u32::try_from(d.as_millis()))
-                .map_err(|_| Error(-5))?,
-        };
-        let raw = match c.payload {
-            Some(payload) => crate::payload::with_settings(payload, |native| {
-                settings.payload = native;
-                unsafe { gst_runtime_rtp_session_new(&settings) }
-            })
-            .map_err(|_| Error(-5))?,
-            None => unsafe { gst_runtime_rtp_session_new(&settings) },
-        };
+        let raw = with_settings(&c, |settings| unsafe {
+            gst_runtime_rtp_session_new(settings)
+        })?;
         let raw = NonNull::new(raw).ok_or(Error(-5))?;
         Ok(Self {
             inner: Arc::new(Inner(raw)),
@@ -306,6 +320,7 @@ mod tests {
             bandwidth_bps: Some(128000),
             payload: None,
             reorder_latency: Some(Duration::from_millis(200)),
+            negotiated: None,
         };
         let mut session = Session::new(config).unwrap();
         assert!(
@@ -338,6 +353,7 @@ mod tests {
         assert!(
             Session::new(Configuration {
                 reorder_latency: None,
+                negotiated: None,
                 ..config
             })
             .is_err()
@@ -375,6 +391,7 @@ mod tests {
             bandwidth_bps: None,
             payload: None,
             reorder_latency: None,
+            negotiated: None,
         })
         .unwrap();
         let packet = [128, 96, 0, 1, 0, 0, 0, 1, 0, 0, 0, 7, 9];

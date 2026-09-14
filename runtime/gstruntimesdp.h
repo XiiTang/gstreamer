@@ -1,5 +1,6 @@
 #ifndef GST_RUNTIME_SDP_H
 #define GST_RUNTIME_SDP_H
+#include "gstruntimertpsession.h"
 #include <gst/gst.h>
 G_BEGIN_DECLS
 typedef struct _GstRuntimeSdp GstRuntimeSdp;
@@ -33,5 +34,11 @@ GST_API int gst_runtime_sdp_parameter (GstRuntimeSdp *description, guint media, 
 GST_API int gst_runtime_sdp_control (GstRuntimeSdp *description, int media, const char *base,
                                      char **result);
 GST_API void gst_runtime_sdp_text_free (char *text);
+/* Select the explicitly declared format against SDP; no sockets or fallback. */
+GST_API int gst_runtime_sdp_select (GstRuntimeSdp *description, guint media, const char *base_uri,
+                                    const char *track_uri, const char *profile,
+                                    const char *lower_transport, gboolean record,
+                                    const GstRuntimeRtpSettings *settings, GstCaps **selected);
+GST_API void gst_runtime_sdp_selection_free (GstCaps *selection);
 G_END_DECLS
 #endif

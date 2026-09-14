@@ -59,8 +59,8 @@ gst_runtime_payload_caps (const GstRuntimePayloadSettings *s)
         }
       else if (s->format == GST_RUNTIME_PAYLOAD_OPUS)
         {
-          gst_caps_set_simple (caps, "encoding-params", G_TYPE_STRING, "2", "sprop-stereo",
-                               G_TYPE_STRING, s->channels == 2 ? "1" : "0", NULL);
+          /* sprop-stereo is a sender hint, not a receiver compatibility limit. */
+          gst_caps_set_simple (caps, "encoding-params", G_TYPE_STRING, "2", NULL);
         }
     }
   else if (s->format == GST_RUNTIME_PAYLOAD_H264 || s->format == GST_RUNTIME_PAYLOAD_H265)

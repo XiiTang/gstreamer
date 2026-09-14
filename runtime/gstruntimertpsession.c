@@ -105,6 +105,7 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
   GstRuntimeRtpSession *s = g_new0 (GstRuntimeRtpSession, 1);
   s->settings = *settings;
   s->settings.payload = NULL;
+  s->settings.negotiated_caps = NULL;
   if (settings->rtx)
     {
       s->rtx = *settings->rtx;
@@ -154,6 +155,15 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
     s->rtp_caps = gst_caps_new_simple ("application/x-rtp", "payload", G_TYPE_INT,
                                        (gint)settings->payload_type, "clock-rate", G_TYPE_INT,
                                        (gint)settings->clock_rate, NULL);
+  if (settings->negotiated_caps)
+    {
+      if (!gst_caps_is_fixed (settings->negotiated_caps)
+          || !gst_caps_can_intersect (s->rtp_caps, settings->negotiated_caps))
+        goto failed;
+      GstCaps *selected = gst_caps_intersect (s->rtp_caps, settings->negotiated_caps);
+      gst_caps_unref (s->rtp_caps);
+      s->rtp_caps = selected;
+    }
   if (settings->feedback & 1)
     gst_caps_set_simple (s->rtp_caps, "rtcp-fb-nack", G_TYPE_BOOLEAN, TRUE, NULL);
   if (settings->feedback & 2)
@@ -222,6 +232,8 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
       g_object_set (s->sink[i], "sync", FALSE, "async", FALSE, "max-buffers", 32u, "drop", FALSE,
                     "wait-on-eos", FALSE, "enable-last-sample", FALSE, NULL);
     }
+  if (settings->negotiated_caps)
+    gst_app_sink_set_caps (GST_APP_SINK (s->sink[0]), settings->negotiated_caps);
   if (s->encoded)
     {
       g_object_set (s->source[0], "do-timestamp", FALSE, "max-buffers", (guint64)8, "max-bytes",
