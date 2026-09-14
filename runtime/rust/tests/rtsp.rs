@@ -125,6 +125,7 @@ fn versioned_transport_view_is_owned_after_next_setup_and_close() {
         client.receive(SECOND).0.unwrap();
         let view = client.transport("s", URI).unwrap().unwrap();
         assert_eq!(view.profile, "AVP");
+        assert_eq!(view.generation, 1);
         assert_eq!(view.ssrcs[0], 0x01020304);
         match version {
             Version::V1 => assert_eq!(view.interleaved, Some((4, Some(5)))),
@@ -146,8 +147,36 @@ fn versioned_transport_view_is_owned_after_next_setup_and_close() {
             client.transport("s", URI).unwrap().unwrap().interleaved,
             Some((8, Some(9)))
         );
+        assert_eq!(client.transport("s", URI).unwrap().unwrap().generation, 2);
         drop(client);
         assert_eq!(view.ssrcs[0], 0x01020304);
         assert_eq!(server.read(&mut [0]).unwrap(), 0);
+    }
+}
+
+#[test]
+fn overlapping_interleaved_channels_cannot_bind_a_sibling_track() {
+    let (stream, mut server) = UnixStream::pair().unwrap();
+    let mut client = Rtsp::from_stream(stream.into(), URI, Version::V2, 4096).unwrap();
+    for (sequence, uri) in [(1, URI.to_owned()), (2, format!("{URI}/other"))] {
+        let headers = if sequence == 1 {
+            vec![]
+        } else {
+            vec![("Session", "s")]
+        };
+        client
+            .request("SETUP", &uri, &headers, &[], SECOND)
+            .0
+            .unwrap();
+        request(&mut server);
+        server.write_all(format!("RTSP/2.0 200 OK\r\nCSeq: {sequence}\r\nSession: s\r\nTransport: RTP/AVP/TCP;unicast;interleaved=4-5\r\n\r\n").as_bytes()).unwrap();
+        let result = client.receive(SECOND).0;
+        if sequence == 1 {
+            result.unwrap();
+        } else {
+            assert!(result.is_err());
+            assert!(client.transport("s", &uri).unwrap().is_none());
+            assert!(client.request("OPTIONS", URI, &[], &[], SECOND).0.is_err());
+        }
     }
 }

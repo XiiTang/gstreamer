@@ -46,6 +46,7 @@ pub struct Address {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transport {
+    pub generation: u64,
     pub profile: &'static str,
     pub lower_transport: &'static str,
     pub play: bool,
@@ -331,6 +332,7 @@ impl Rtsp {
             unsafe { std::slice::from_raw_parts(view.ssrcs, view.ssrc_count as usize) }.to_vec()
         };
         Ok(Some(Transport {
+            generation: view.generation,
             profile: match view.profile {
                 1 => "AVP",
                 2 => "SAVP",
