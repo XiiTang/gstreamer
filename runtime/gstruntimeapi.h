@@ -65,6 +65,10 @@ int gst_runtime_rtsp_message_header (GstRuntimeRtspMessage *message, guint index
 GST_API
 void gst_runtime_rtsp_message_free (GstRuntimeRtspMessage *message);
 GST_API
+int gst_runtime_rtsp_session_info (GstRuntimeRtsp *client, const char *session,
+                                   guint64 *timeout_seconds, int *explicit_timeout,
+                                   guint64 *control_response_age_us);
+GST_API
 int gst_runtime_rtsp_state (GstRuntimeRtsp *client, const char *session, const char *uri);
 GST_API
 void gst_runtime_rtsp_cancel (GstRuntimeRtsp *client);

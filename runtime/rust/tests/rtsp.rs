@@ -372,3 +372,53 @@ fn rtsp2_basic_is_only_offered_over_verified_tls_and_never_auto_sent() {
         );
     }
 }
+
+#[test]
+fn session_timeout_is_lossless_and_explicit_keepalive_preserves_the_track() {
+    for (version, wire) in [(Version::V1, "1.0"), (Version::V2, "2.0")] {
+        let (stream, mut server) = UnixStream::pair().unwrap();
+        let mut client = Rtsp::from_stream(stream.into(), URI, version, 4096).unwrap();
+        assert!(client.session_info("retained-session").unwrap().is_none());
+        client
+            .request(
+                "SETUP",
+                URI,
+                &[("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")],
+                &[],
+                SECOND,
+            )
+            .0
+            .unwrap();
+        request(&mut server);
+        server.write_all(format!("RTSP/{wire} 200 OK\r\nCSeq: 1\r\nSession: retained-session;timeout=18446744073709551615\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n").as_bytes()).unwrap();
+        client.receive(SECOND).0.unwrap();
+        let info = client.session_info("retained-session").unwrap().unwrap();
+        assert_eq!(info.timeout_seconds, u64::MAX);
+        assert!(info.timeout_explicit);
+        client
+            .request(
+                "GET_PARAMETER",
+                URI,
+                &[("Session", "retained-session")],
+                &[],
+                SECOND,
+            )
+            .0
+            .unwrap();
+        request(&mut server);
+        server
+            .write_all(
+                format!("RTSP/{wire} 200 OK\r\nCSeq: 2\r\nSession: retained-session\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        client.receive(SECOND).0.unwrap();
+        let info = client.session_info("retained-session").unwrap().unwrap();
+        assert_eq!(info.timeout_seconds, u64::MAX);
+        assert!(info.control_response_age < SECOND);
+        assert_eq!(
+            client.state("retained-session", URI).unwrap(),
+            Some(imapipe_media::rtsp::TrackState::Ready)
+        );
+    }
+}

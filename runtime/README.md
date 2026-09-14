@@ -78,3 +78,13 @@ transport integration have separate acceptance gates.
 checks its committed source and artifact hashes before building. Every Runtime
 packet must commit encrypted state before sending ciphertext or delivering
 verified plaintext. Native/Rust tests do not replace Runtime crash/lease tests.
+
+Session maintenance observations: the native RTSP client parses the response-only
+Session timeout parameter (default 60 seconds) without narrowing its integer
+value. Requests cannot send timeout parameters. The session view exposes the
+negotiated value, whether it was explicit, and age of the last confirmed control
+response. These observations do not imply server expiry: RTCP can also provide
+liveness, and a local timer neither closes the track nor sends a keepalive.
+OPTIONS/GET_PARAMETER remain explicit requests with the selected Session ID.
+Validation covers both versions, zero and u64 maximum, missing/default values,
+overflow, duplicate/invalid parameters and no implicit requests.

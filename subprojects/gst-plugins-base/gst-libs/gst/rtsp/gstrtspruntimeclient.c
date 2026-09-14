@@ -19,6 +19,9 @@ typedef struct
 {
   gchar *aggregate;
   GHashTable *tracks;
+  guint64 timeout_seconds;
+  gboolean timeout_explicit;
+  gint64 last_control_response;
 } RuntimeSession;
 struct _GstRTSPRuntimeClient
 {
@@ -90,20 +93,54 @@ valid_uri (const gchar *value)
   return TRUE;
 }
 static gchar *
-session_header (GstRTSPMessage *message)
+session_header (GstRTSPMessage *message, guint64 *timeout_seconds, gboolean *explicit_timeout)
 {
   gchar *value = NULL;
+  if (timeout_seconds)
+    *timeout_seconds = 60;
+  if (explicit_timeout)
+    *explicit_timeout = FALSE;
   if (gst_rtsp_message_get_header (message, GST_RTSP_HDR_SESSION, &value, 0) != GST_RTSP_OK)
     return NULL;
   if (gst_rtsp_message_get_header (message, GST_RTSP_HDR_SESSION, NULL, 1) == GST_RTSP_OK)
     return NULL;
-  gsize length = strcspn (value, ";");
-  if (!length)
-    return NULL;
-  for (gsize i = 0; i < length; i++)
-    if (!g_ascii_isalnum (value[i]) && !strchr ("-_.+", value[i]))
-      return NULL;
-  return g_strndup (value, length);
+  gchar **parts = g_strsplit (value, ";", 2);
+  gchar *id = g_strstrip (parts[0]);
+  gboolean valid = *id != 0;
+  for (const gchar *p = id; valid && *p; p++)
+    valid = g_ascii_isalnum (*p) || strchr ("-_.+", *p);
+  if (valid && parts[1])
+    {
+      /* RFC 2326 12.37 / RFC 7826 10.5: timeout is response-only. */
+      gchar *parameter = g_strstrip (parts[1]);
+      gchar *equal = strchr (parameter, '=');
+      valid = message->type == GST_RTSP_MESSAGE_RESPONSE && equal;
+      if (valid)
+        {
+          *equal = 0;
+          valid = !g_ascii_strcasecmp (g_strstrip (parameter), "timeout");
+          gchar *number = g_strstrip (equal + 1);
+          guint64 seconds = 0;
+          valid = valid && *number;
+          for (const gchar *p = number; valid && *p; p++)
+            {
+              if (!g_ascii_isdigit (*p) || seconds > (G_MAXUINT64 - (*p - '0')) / 10)
+                valid = FALSE;
+              else
+                seconds = seconds * 10 + (*p - '0');
+            }
+          if (valid)
+            {
+              if (timeout_seconds)
+                *timeout_seconds = seconds;
+              if (explicit_timeout)
+                *explicit_timeout = TRUE;
+            }
+        }
+    }
+  gchar *result = valid ? g_strdup (id) : NULL;
+  g_strfreev (parts);
+  return result;
 }
 GstRTSPResult
 gst_rtsp_runtime_client_new (const GstRTSPUrl *url, GSocket *socket, GstRTSPVersion version,
@@ -162,7 +199,7 @@ request_mode (GstRTSPRuntimeClient *client, GstRTSPMessage *request, gint64 time
   if (gst_rtsp_message_get_header (request, GST_RTSP_HDR_CSEQ, NULL, 0) == GST_RTSP_OK
       || gst_rtsp_message_get_header (request, GST_RTSP_HDR_CONTENT_LENGTH, NULL, 0) == GST_RTSP_OK)
     return GST_RTSP_EINVAL;
-  gchar *id = session_header (request);
+  gchar *id = session_header (request, NULL, NULL);
   RuntimeSession *session = lookup (client, id);
   if ((id && !session)
       || (!id
@@ -316,8 +353,13 @@ receive_result (GstRTSPRuntimeClient *client, GstRTSPMessage *message, GstRTSPRe
   RuntimeSession *session = lookup (client, client->session);
   if (code >= 200 && code < 300)
     {
-      gchar *id = session_header (message);
+      guint64 timeout_seconds;
+      gboolean timeout_explicit;
+      gchar *id = session_header (message, &timeout_seconds, &timeout_explicit);
       if ((client->method == GST_RTSP_SETUP && !id)
+          || (!id
+              && gst_rtsp_message_get_header (message, GST_RTSP_HDR_SESSION, NULL, 0)
+                     == GST_RTSP_OK)
           || (id && client->session && strcmp (id, client->session)))
         {
           g_free (id);
@@ -377,6 +419,8 @@ receive_result (GstRTSPRuntimeClient *client, GstRTSPMessage *message, GstRTSPRe
               session->tracks = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, track_free);
               g_hash_table_insert (client->sessions, g_strdup (id), session);
             }
+          session->timeout_seconds = timeout_seconds;
+          session->timeout_explicit = timeout_explicit;
           RuntimeTrack *track = g_hash_table_lookup (session->tracks, client->uri);
           if (track && track->generation == G_MAXUINT64)
             {
@@ -407,6 +451,15 @@ receive_result (GstRTSPRuntimeClient *client, GstRTSPMessage *message, GstRTSPRe
         transition (client, session, GST_RTSP_RUNTIME_READY);
       else if (client->method == GST_RTSP_TEARDOWN)
         transition (client, session, GST_RTSP_RUNTIME_CLOSED);
+      if (session)
+        {
+          if (timeout_explicit)
+            {
+              session->timeout_seconds = timeout_seconds;
+              session->timeout_explicit = TRUE;
+            }
+          session->last_control_response = g_get_monotonic_time ();
+        }
       g_free (id);
     }
   else if (code == 454 && session)
@@ -460,6 +513,19 @@ GstRTSPRuntimeDispatch
 gst_rtsp_runtime_client_dispatch (GstRTSPRuntimeClient *client)
 {
   return client->dispatch;
+}
+gboolean
+gst_rtsp_runtime_client_session_info (GstRTSPRuntimeClient *client, const gchar *id,
+                                      guint64 *seconds, gboolean *explicit_timeout,
+                                      guint64 *control_response_age_us)
+{
+  RuntimeSession *session = lookup (client, id);
+  if (!session)
+    return FALSE;
+  *seconds = session->timeout_seconds;
+  *explicit_timeout = session->timeout_explicit;
+  *control_response_age_us = MAX (g_get_monotonic_time () - session->last_control_response, 0);
+  return TRUE;
 }
 gboolean
 gst_rtsp_runtime_client_track_state (GstRTSPRuntimeClient *client, const gchar *id,

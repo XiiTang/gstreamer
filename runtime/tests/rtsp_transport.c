@@ -225,6 +225,43 @@ explicit_state (GstRTSPVersion version)
   g_assert_nonnull (negotiated);
   g_assert_cmpint (negotiated->interleaved.min, ==, 0);
   g_assert_cmpint (negotiated->interleaved.max, ==, 1);
+  guint64 seconds, age;
+  gboolean explicit_timeout;
+  g_assert_true (
+      gst_rtsp_runtime_client_session_info (client, session, &seconds, &explicit_timeout, &age));
+  g_assert_cmpuint (seconds, ==, 30);
+  g_assert_true (explicit_timeout);
+  g_assert_false (
+      gst_rtsp_runtime_client_session_info (client, "absent", &seconds, &explicit_timeout, &age));
+  GstRTSPMessage invalid_request = { 0 };
+  gst_rtsp_message_init_request (&invalid_request, GST_RTSP_GET_PARAMETER, root);
+  invalid_request.type_data.request.version = version;
+  gst_rtsp_message_add_header (&invalid_request, GST_RTSP_HDR_SESSION,
+                               "retained-session;timeout=1");
+  g_assert_cmpint (gst_rtsp_runtime_client_request (client, &invalid_request, 1000000), ==,
+                   GST_RTSP_EINVAL);
+  gst_rtsp_message_unset (&invalid_request);
+  operation (client, pair[1], version, GST_RTSP_GET_PARAMETER, root, session, seq++, 200,
+             "Session: retained-session;timeout=0\r\n");
+  g_usleep (2000);
+  g_assert_true (
+      gst_rtsp_runtime_client_session_info (client, session, &seconds, &explicit_timeout, &age));
+  g_assert_cmpuint (seconds, ==, 0);
+  g_assert_cmpuint (age, >=, 1000);
+  gchar no_implicit_request;
+  g_assert_cmpint (recv (pair[1], &no_implicit_request, 1, MSG_DONTWAIT), ==, -1);
+  g_assert_cmpint (errno, ==, EAGAIN);
+  operation (client, pair[1], version, GST_RTSP_OPTIONS, root, session, seq++, 200,
+             "Session: retained-session; timeout = 18446744073709551615\r\n");
+  g_assert_true (
+      gst_rtsp_runtime_client_session_info (client, session, &seconds, &explicit_timeout, &age));
+  g_assert_cmpuint (seconds, ==, G_MAXUINT64);
+  operation (client, pair[1], version, GST_RTSP_SETUP, one, session, seq++, 200,
+             "Session: retained-session\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n");
+  g_assert_true (
+      gst_rtsp_runtime_client_session_info (client, session, &seconds, &explicit_timeout, &age));
+  g_assert_cmpuint (seconds, ==, 60);
+  g_assert_false (explicit_timeout);
   state_is (client, one, GST_RTSP_RUNTIME_READY);
   state_is (client, two, GST_RTSP_RUNTIME_READY);
   operation (client, pair[1], version, GST_RTSP_PLAY, one, session, seq++, 200, NULL);
@@ -395,6 +432,45 @@ incremental_duplex_write (void)
            "cancellation\n");
 }
 
+static void
+invalid_session_timeout (GstRTSPVersion version, const gchar *value)
+{
+  int pair[2];
+  g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, pair), ==, 0);
+  GSocket *socket = g_socket_new_from_fd (pair[0], NULL);
+  GstRTSPUrl *url = NULL;
+  gst_rtsp_url_parse ("rtsp://never-resolve.invalid/live", &url);
+  GstRTSPRuntimeClient *client = NULL;
+  g_assert_cmpint (gst_rtsp_runtime_client_new (url, socket, version, 1024, &client), ==,
+                   GST_RTSP_OK);
+  g_object_unref (socket);
+  gst_rtsp_url_free (url);
+  GstRTSPMessage request = { 0 }, response = { 0 };
+  gst_rtsp_message_init_request (&request, GST_RTSP_SETUP, "rtsp://never-resolve.invalid/live/one");
+  request.type_data.request.version = version;
+  gst_rtsp_message_add_header (&request, GST_RTSP_HDR_TRANSPORT,
+                               "RTP/AVP/TCP;unicast;interleaved=0-1");
+  g_assert_cmpint (gst_rtsp_runtime_client_request (client, &request, 1000000), ==, GST_RTSP_OK);
+  gchar wire[8192];
+  g_assert_cmpint (read (pair[1], wire, sizeof (wire)), >, 0);
+  gchar *reply
+      = g_strdup_printf ("RTSP/%s 200 OK\r\nCSeq: 1\r\nSession: retained-session;%s\r\nTransport: "
+                         "RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+                         version == GST_RTSP_VERSION_2_0 ? "2.0" : "1.0", value);
+  g_assert_cmpint (write (pair[1], reply, strlen (reply)), ==, strlen (reply));
+  g_assert_cmpint (gst_rtsp_runtime_client_receive (client, &response, 1000000), ==,
+                   GST_RTSP_EPARSE);
+  guint64 seconds, age;
+  gboolean explicit_timeout;
+  g_assert_false (gst_rtsp_runtime_client_session_info (client, "retained-session", &seconds,
+                                                        &explicit_timeout, &age));
+  g_free (reply);
+  gst_rtsp_message_unset (&request);
+  gst_rtsp_message_unset (&response);
+  gst_rtsp_runtime_client_free (client);
+  close (pair[1]);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -407,6 +483,15 @@ main (int argc, char **argv)
   malformed ();
   explicit_state (GST_RTSP_VERSION_1_0);
   explicit_state (GST_RTSP_VERSION_2_0);
+  const gchar *invalid[] = {
+    "timeout=-1", "timeout=18446744073709551616", "timeout=1;timeout=2", "timeout=1x", "other=x",
+    "timeout="
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (invalid); i++)
+    {
+      invalid_session_timeout (GST_RTSP_VERSION_1_0, invalid[i]);
+      invalid_session_timeout (GST_RTSP_VERSION_2_0, invalid[i]);
+    }
   g_print ("PASS RTSP 1.0/2.0: supplied protected stream, exact negative response and binary "
            "frame, partial-body cancel, strict lengths, no extra requests\n");
   return 0;

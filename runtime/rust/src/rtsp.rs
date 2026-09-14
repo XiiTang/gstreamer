@@ -47,6 +47,12 @@ pub struct Address {
     pub port: u16,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub timeout_seconds: u64,
+    pub timeout_explicit: bool,
+    pub control_response_age: Duration,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transport {
     pub generation: u64,
     pub profile: &'static str,
@@ -577,6 +583,30 @@ impl Rtsp {
             destination_addresses: addresses(view.dest_host, view.dest_port, view.dest_count)?,
             ssrcs,
         }))
+    }
+    pub fn session_info(&mut self, session: &str) -> Result<Option<SessionInfo>, Error> {
+        let session = CString::new(session).map_err(|_| Error::INVALID)?;
+        let mut seconds = 0;
+        let mut explicit = 0;
+        let mut age = 0;
+        let result = unsafe {
+            ffi::gst_runtime_rtsp_session_info(
+                self.inner.0.as_ptr(),
+                session.as_ptr(),
+                &mut seconds,
+                &mut explicit,
+                &mut age,
+            )
+        };
+        match result {
+            0 => Ok(Some(SessionInfo {
+                timeout_seconds: seconds,
+                timeout_explicit: explicit != 0,
+                control_response_age: Duration::from_micros(age),
+            })),
+            1 => Ok(None),
+            value => Err(Error(value)),
+        }
     }
     pub fn state(&mut self, session: &str, uri: &str) -> Result<Option<TrackState>, Error> {
         let session = text(session)?;
