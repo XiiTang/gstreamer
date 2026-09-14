@@ -1828,8 +1828,12 @@ read_line (GstRTSPConnection * conn, guint8 * buffer, guint * idx, guint size,
       /* need to read ahead one more character to know what to do... */
       i = 0;
       res = read_bytes (conn, &read_ahead, &i, 1, block);
-      if (G_UNLIKELY (res != GST_RTSP_OK))
+      if (G_UNLIKELY (res != GST_RTSP_OK)) {
+        /* A nonblocking read may stop exactly after CR or LF. Preserve
+         * that consumed byte just like the existing CRLF prefix states. */
+        if (conn->read_ahead == 0) conn->read_ahead = c;
         return res;
+      }
 
       if (read_ahead == ' ' || read_ahead == '\t') {
         if (conn->read_ahead == READ_AHEAD_CRLFCR) {
