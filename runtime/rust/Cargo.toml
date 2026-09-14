@@ -7,9 +7,6 @@ license = "LGPL-2.1-or-later"
 links = "imapipe_gstreamer_full"
 build = "build.rs"
 
-[dependencies]
-libc = "0.2"
-
 [workspace]
 
 [lints.rust]
