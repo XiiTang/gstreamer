@@ -1,5 +1,6 @@
 #include "gstruntimesdp.h"
 #include <gio/gio.h>
+#include <gst/rtp/gstrtppayloads.h>
 #include <gst/sdp/gstsdpmessage.h>
 #include <string.h>
 
@@ -241,6 +242,12 @@ fields (GstRuntimeSdp *s, const guint8 *data, gsize length)
     }
   return version && origin && name && time;
 }
+static void
+caps_free (gpointer caps)
+{
+  if (caps)
+    gst_caps_unref (caps);
+}
 int
 gst_runtime_sdp_new (const guint8 *data, gsize length, GstRuntimeSdp **result)
 {
@@ -249,7 +256,7 @@ gst_runtime_sdp_new (const guint8 *data, gsize length, GstRuntimeSdp **result)
   *result = NULL;
   GstRuntimeSdp *s = g_new0 (GstRuntimeSdp, 1);
   s->fields = g_array_new (FALSE, FALSE, sizeof (Field));
-  s->formats = g_ptr_array_new_with_free_func (g_free);
+  s->formats = g_ptr_array_new_with_free_func (caps_free);
   if (!fields (s, data, length) || gst_sdp_message_new (&s->message) != GST_SDP_OK
       || gst_sdp_message_parse_buffer (data, length, s->message) != GST_SDP_OK)
     {
@@ -262,17 +269,23 @@ gst_runtime_sdp_new (const guint8 *data, gsize length, GstRuntimeSdp **result)
       for (guint j = 0; j < gst_sdp_media_formats_len (m); j++)
         {
           const char *format = gst_sdp_media_get_format (m, j);
-          gchar *text = NULL;
+          GstCaps *caps = NULL;
           if (g_str_has_prefix (gst_sdp_media_get_proto (m), "RTP/") && decimal (format, 127))
             {
-              GstCaps *caps = gst_sdp_media_get_caps_from_media (m, atoi (format));
+              caps = gst_sdp_media_get_caps_from_media (m, atoi (format));
               if (caps)
                 {
-                  text = gst_caps_to_string (caps);
-                  gst_caps_unref (caps);
+                  GstStructure *structure = gst_caps_get_structure (caps, 0);
+                  if (!gst_structure_has_field (structure, "encoding-name"))
+                    {
+                      const GstRTPPayloadInfo *info = gst_rtp_payload_info_for_pt (atoi (format));
+                      if (info && info->encoding_name)
+                        gst_structure_set (structure, "encoding-name", G_TYPE_STRING,
+                                           info->encoding_name, NULL);
+                    }
                 }
             }
-          g_ptr_array_add (s->formats, text);
+          g_ptr_array_add (s->formats, caps);
         }
     }
   *result = s;
@@ -317,20 +330,67 @@ gst_runtime_sdp_field (GstRuntimeSdp *s, guint index, GstRuntimeSdpField *v)
   *v = (GstRuntimeSdpField){ f->scope, f->type, f->value };
   return 0;
 }
-int
-gst_runtime_sdp_format (GstRuntimeSdp *s, guint media, guint format, const char **name,
-                        const char **caps)
+static GstCaps *
+format_caps (GstRuntimeSdp *s, guint media, guint format)
 {
-  if (!s || !name || !caps || media >= gst_runtime_sdp_media_count (s))
+  if (!s || media >= gst_runtime_sdp_media_count (s))
+    return NULL;
+  const GstSDPMedia *m = gst_sdp_message_get_media (s->message, media);
+  if (format >= gst_sdp_media_formats_len (m))
+    return NULL;
+  guint offset = format;
+  for (guint i = 0; i < media; i++)
+    offset += gst_sdp_media_formats_len (gst_sdp_message_get_media (s->message, i));
+  return g_ptr_array_index (s->formats, offset);
+}
+int
+gst_runtime_sdp_format (GstRuntimeSdp *s, guint media, guint format, const char **name)
+{
+  if (!s || !name || media >= gst_runtime_sdp_media_count (s))
     return -2;
   const GstSDPMedia *m = gst_sdp_message_get_media (s->message, media);
   if (format >= gst_sdp_media_formats_len (m))
     return -2;
-  guint offset = format;
-  for (guint i = 0; i < media; i++)
-    offset += gst_sdp_media_formats_len (gst_sdp_message_get_media (s->message, i));
   *name = gst_sdp_media_get_format (m, format);
-  *caps = g_ptr_array_index (s->formats, offset);
+  return 0;
+}
+int
+gst_runtime_sdp_parameter (GstRuntimeSdp *s, guint media, guint format, guint index,
+                           GstRuntimeSdpParameter *view)
+{
+  if (!view)
+    return -2;
+  GstCaps *caps = format_caps (s, media, format);
+  if (!caps)
+    return 1;
+  const GstStructure *structure = gst_caps_get_structure (caps, 0);
+  if (index >= (guint)gst_structure_n_fields (structure))
+    return 1;
+  const char *name = gst_structure_nth_field_name (structure, index);
+  const GValue *value = gst_structure_get_value (structure, name);
+  *view = (GstRuntimeSdpParameter){ .name = name };
+  if (G_VALUE_HOLDS_STRING (value))
+    {
+      view->type = 1;
+      view->text = g_value_get_string (value);
+    }
+  else if (G_VALUE_HOLDS_INT (value))
+    {
+      view->type = 2;
+      view->number = g_value_get_int (value);
+    }
+  else if (G_VALUE_HOLDS_UINT (value))
+    {
+      view->type = 2;
+      view->number = g_value_get_uint (value);
+    }
+  else if (G_VALUE_HOLDS_BOOLEAN (value))
+    {
+      view->type = 3;
+      view->number = g_value_get_boolean (value);
+    }
+  else
+    return -2;
   return 0;
 }
 static gboolean

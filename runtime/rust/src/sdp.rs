@@ -19,9 +19,23 @@ struct FieldView {
     kind: i32,
     value: *const c_char,
 }
+#[repr(C)]
+struct ParameterView {
+    name: *const c_char,
+    text: *const c_char,
+    number: i64,
+    kind: i32,
+}
 unsafe extern "C" {
     fn gst_runtime_sdp_new(data: *const u8, length: usize, result: *mut *mut c_void) -> i32;
     fn gst_runtime_sdp_free(description: *mut c_void);
+    fn gst_runtime_sdp_parameter(
+        description: *mut c_void,
+        media: u32,
+        format: u32,
+        index: u32,
+        view: *mut ParameterView,
+    ) -> i32;
     fn gst_runtime_sdp_control(
         description: *mut c_void,
         media: i32,
@@ -37,7 +51,6 @@ unsafe extern "C" {
         media: u32,
         format: u32,
         name: *mut *const c_char,
-        caps: *mut *const c_char,
     ) -> i32;
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,9 +60,15 @@ pub struct Field {
     pub value: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Parameter {
+    Text(String),
+    Integer(i64),
+    Boolean(bool),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Format {
     pub name: String,
-    pub native_caps: Option<String>,
+    pub parameters: Vec<(String, Parameter)>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Media {
@@ -154,17 +173,39 @@ impl Description {
             let mut formats = Vec::new();
             for format in 0..view.formats {
                 let mut name = std::ptr::null();
-                let mut caps = std::ptr::null();
-                Error::check(unsafe {
-                    gst_runtime_sdp_format(raw, index, format, &mut name, &mut caps)
-                })?;
+                Error::check(unsafe { gst_runtime_sdp_format(raw, index, format, &mut name) })?;
+                let mut parameters = Vec::new();
+                loop {
+                    let mut view = ParameterView {
+                        name: std::ptr::null(),
+                        text: std::ptr::null(),
+                        number: 0,
+                        kind: 0,
+                    };
+                    let code = unsafe {
+                        gst_runtime_sdp_parameter(
+                            raw,
+                            index,
+                            format,
+                            parameters.len().try_into().map_err(|_| Error::INVALID)?,
+                            &mut view,
+                        )
+                    };
+                    if code == 1 {
+                        break;
+                    }
+                    Error::check(code)?;
+                    let value = match view.kind {
+                        1 => Parameter::Text(unsafe { text(view.text) }?),
+                        2 => Parameter::Integer(view.number),
+                        3 => Parameter::Boolean(view.number != 0),
+                        _ => return Err(Error::INVALID),
+                    };
+                    parameters.push((unsafe { text(view.name) }?, value));
+                }
                 formats.push(Format {
                     name: unsafe { text(name) }?,
-                    native_caps: if caps.is_null() {
-                        None
-                    } else {
-                        Some(unsafe { text(caps) }?)
-                    },
+                    parameters,
                 });
             }
             media.push(Media {
@@ -210,10 +251,13 @@ mod tests {
         assert_eq!((d.media[1].port, d.media[1].port_count), (5004, 2));
         assert!(
             d.media[0].formats[0]
-                .native_caps
-                .as_ref()
-                .unwrap()
-                .contains("H264")
+                .parameters
+                .contains(&("encoding-name".into(), Parameter::Text("H264".into())))
+        );
+        assert!(
+            d.media[1].formats[0]
+                .parameters
+                .contains(&("encoding-name".into(), Parameter::Text("PCMU".into())))
         );
         assert_eq!(
             d.fields
