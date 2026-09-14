@@ -55,6 +55,8 @@
 
 #include <gst/gst.h>
 
+int gst_srtp_initialize_library (void);
+
 void srtp_element_init (GstPlugin * plugin);
 
 GST_ELEMENT_REGISTER_DECLARE (srtpdec);
