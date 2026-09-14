@@ -4,11 +4,12 @@ p=argparse.ArgumentParser();p.add_argument('--build',type=pathlib.Path,required=
 a=p.parse_args();root=pathlib.Path(__file__).resolve().parents[2];a.output.mkdir(parents=True,exist_ok=True)
 env=dict(os.environ,PKG_CONFIG_PATH=str(a.build/'meson-uninstalled'))
 def flags(*args):return shlex.split(subprocess.check_output(['pkg-config',*args,'gstreamer-full-1.0','gio-2.0'],env=env,text=True))
-for name in ['rtsp_transport','payload']:
+for name in ['rtsp_transport','payload','rtp_session']:
  subprocess.run(['cc','-std=c11','-g','-I'+str(root/'runtime'),'-I'+str(root/'subprojects/gst-plugins-base/gst-libs/gst/rtsp'),*flags('--cflags'),str(root/'runtime/tests'/f'{name}.c'),*flags('--libs'),'-Wl,-rpath,'+str(a.build.resolve()),'-o',str(a.output/name)],check=True)
 registry=a.output/'must-not-create-registry.bin'
 env.update(GST_PLUGIN_PATH_1_0='/nonexistent/forbidden',GST_PLUGIN_SYSTEM_PATH_1_0='/nonexistent/forbidden',GST_REGISTRY_1_0=str(registry),GST_DEBUG='9')
 subprocess.run([str(a.output/'rtsp_transport')],env=env,check=True)
+subprocess.run([str(a.output/'rtp_session')],env=env,check=True)
 common=['ffmpeg','-v','error','-y','-f','lavfi','-i','color=c=black:s=64x64:r=1','-frames:v','1','-an']
 subprocess.run([*common,'-c:v','libx264','-preset','ultrafast','-tune','zerolatency','-f','h264',str(a.output/'h264')],check=True)
 subprocess.run([*common,'-c:v','libx265','-x265-params','pools=1:frame-threads=1:log-level=error','-f','hevc',str(a.output/'h265')],check=True)
