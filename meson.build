@@ -521,6 +521,7 @@ if building_full
     'runtime/gstruntimeapi.c',
     'runtime/gstruntimepayloadapi.c',
     'runtime/gstruntimesrtpapi.c',
+    'runtime/gstruntimertpsession.c',
     c_args: ['-DBUILDING_GST'] + gst_c_args,
     target_type: get_option('gst-full-target-type'),
     link_args: gstfull_link_args,
