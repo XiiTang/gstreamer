@@ -1,5 +1,6 @@
 #include "gstruntimepayload.h"
 #include "gstruntimertpsession.h"
+#include "gstruntimesdp.h"
 #include <gst/rtp/gstrtpbuffer.h>
 #include <string.h>
 
@@ -114,11 +115,35 @@ session_roundtrip (GstRuntimePayloadFormat format, const guint8 *data, gsize len
     .reorder = TRUE,
     .latency_ms = 10,
   };
+  const char *mapping[] = { NULL,
+                            "H264/90000\r\na=fmtp:96 packetization-mode=1",
+                            "H265/90000",
+                            "JPEG/90000",
+                            "opus/48000/2",
+                            "MPEG4-GENERIC/44100/2\r\na=fmtp:96 streamtype=5; mode=AAC-hbr; "
+                            "config=1210; sizeLength=13; indexLength=3; indexDeltaLength=3",
+                            "PCMA/8000",
+                            "PCMU/8000" };
+  gchar *body
+      = g_strdup_printf ("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=test\r\nt=0 0\r\n"
+                         "m=%s 5004 RTP/AVP 96\r\na=rtpmap:96 %s\r\na=control:track\r\n",
+                         format <= GST_RUNTIME_PAYLOAD_JPEG ? "video" : "audio", mapping[format]);
+  GstRuntimeSdp *description = NULL;
+  g_assert_cmpint (gst_runtime_sdp_new ((guint8 *)body, strlen (body), &description), ==, 0);
+  GstCaps *selection = NULL;
+  g_assert_cmpint (gst_runtime_sdp_select (description, 0, "rtsp://localhost/media/",
+                                           "rtsp://localhost/media/track", "AVP", "tcp", FALSE,
+                                           &settings, &selection),
+                   ==, 0);
+  settings.negotiated_caps = selection;
+  gst_runtime_sdp_free (description);
+  g_free (body);
   GstRuntimeRtpSession *send = gst_runtime_rtp_session_new (&settings);
   g_assert_nonnull (send);
   codec.ssrc = settings.ssrc = 654321;
   GstRuntimeRtpSession *receive = gst_runtime_rtp_session_new (&settings);
   g_assert_nonnull (receive);
+  gst_runtime_sdp_selection_free (selection);
   g_assert_cmpint (
       gst_runtime_rtp_session_try_write_frame (send, data, length, 0, 20 * GST_MSECOND), ==,
       GST_FLOW_OK);

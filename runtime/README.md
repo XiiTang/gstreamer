@@ -88,3 +88,18 @@ liveness, and a local timer neither closes the track nor sends a keepalive.
 OPTIONS/GET_PARAMETER remain explicit requests with the selected Session ID.
 Validation covers both versions, zero and u64 maximum, missing/default values,
 overflow, duplicate/invalid parameters and no implicit requests.
+
+SDP media selection is validated natively against the already negotiated track:
+resolved control URI (including single-media session inheritance), RTP profile and
+optional lower transport, media direction, payload/clock, codec framing, and the
+declared feedback/RTX `apt` mapping. Selection owns immutable caps. RTP session
+construction copies them into the receive mapping and outgoing caps negotiation;
+callers cannot submit arbitrary caps or pipeline strings. Opus sender hints are
+not treated as receive compatibility limits. H264 supports packetization mode 1,
+H265 supports no DON fields, and MPEG4-GENERIC supports the declared AAC-hbr AU
+header layout and matching AudioSpecificConfig. Other SDP fields remain available
+in the original parsed description; this does not claim encoder constraints are
+validated against every future encoded frame. `sdp_selection.c` covers acceptance
+and rejection and `payload.c` binds all seven actual payload round trips through
+SDP, with independent FFmpeg pixel checks. RFC 7826 Appendix D and RFC 7587 define
+the inherited control/direction and Opus hint interpretation respectively.
