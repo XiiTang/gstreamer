@@ -56,6 +56,7 @@
 #include <stdlib.h>
 
 #include "gstrtsptransport.h"
+#include <gio/gio.h>
 #include "gstrtsp-enumtypes.h"
 
 #define MAX_MANAGERS	2
@@ -74,6 +75,9 @@ typedef enum
   RTSP_TRANSPORT_SERVER_PORT = 1 << 9,
   RTSP_TRANSPORT_SSRC = 1 << 10,
   RTSP_TRANSPORT_MODE = 1 << 11,
+  RTSP_TRANSPORT_DEST_ADDR = 1 << 12,
+  RTSP_TRANSPORT_SRC_ADDR = 1 << 13,
+  RTSP_TRANSPORT_RTCP_MUX = 1 << 14,
 } RTSPTransportParameter;
 
 typedef struct
@@ -185,6 +189,11 @@ gst_rtsp_transport_init (GstRTSPTransport * transport)
 
   g_free (transport->destination);
   g_free (transport->source);
+  for (guint i = 0; i < 2; i++) {
+    g_free (transport->dest_addr[i].host);
+    g_free (transport->src_addr[i].host);
+  }
+  g_clear_pointer (&transport->ssrcs, g_array_unref);
 
   memset (transport, 0, sizeof (GstRTSPTransport));
 
@@ -319,8 +328,23 @@ gst_rtsp_transport_get_manager (GstRTSPTransMode trans, const gchar ** manager,
 static void
 parse_mode (GstRTSPTransport * transport, const gchar * str)
 {
-  transport->mode_play = (strstr (str, "play") != NULL);
-  transport->mode_record = (strstr (str, "record") != NULL);
+  transport->mode_play = FALSE;
+  transport->mode_record = FALSE;
+  gchar *value = g_strdup (str);
+  gsize length = strlen (value);
+  if (length >= 2 && value[0] == '"' && value[length - 1] == '"') {
+    value[length - 1] = 0;
+    memmove (value, value + 1, length - 1);
+  }
+  gchar **modes = g_strsplit (value, ",", 0);
+  for (guint i = 0; modes[i]; i++) {
+    g_strstrip (modes[i]);
+    if (!strcmp (modes[i], "play")) transport->mode_play = TRUE;
+    else if (!strcmp (modes[i], "record")) transport->mode_record = TRUE;
+    else { transport->mode_play = transport->mode_record = FALSE; break; }
+  }
+  g_strfreev (modes);
+  g_free (value);
 }
 
 static gboolean
@@ -357,11 +381,11 @@ parse_range (const gchar * str, GstRTSPRange * range)
     if (!check_range (str, &tmp, &range->min) || str == tmp || tmp != minus)
       goto invalid_range;
 
-    if (!check_range (minus + 1, &tmp, &range->max) || (*tmp && *tmp != ';'))
+    if (!check_range (minus + 1, &tmp, &range->max) || tmp == minus + 1 || *tmp)
       goto invalid_range;
   } else {
     if (!check_range (str, &tmp, &range->min) || str == tmp ||
-        (*tmp && *tmp != ';'))
+        *tmp)
       goto invalid_range;
 
     range->max = -1;
@@ -429,10 +453,54 @@ rtsp_transport_ltrans_as_text (const GstRTSPTransport * transport)
 }
 
 #define IS_VALID_PORT_RANGE(range) \
-    (range.min >= 0 && range.min < 65536 && range.max < 65536)
+    (range.min >= 0 && range.min < 65536 && range.max < 65536 && (range.max == -1 || range.max >= range.min))
 
 #define IS_VALID_INTERLEAVE_RANGE(range) \
-    (range.min >= 0 && range.min < 256 && range.max < 256)
+    (range.min >= 0 && range.min < 256 && range.max < 256 && (range.max == -1 || range.max >= range.min))
+
+/* RFC 7826 Appendix C.1.2 permits one RTP and an optional RTCP tuple.
+ * Parsing never resolves a hostname or opens a socket. */
+static gboolean
+parse_addresses (const gchar *text, GstRTSPTransportAddress addresses[2], guint *count)
+{
+  const gchar *cursor = text;
+  while (*cursor) {
+    if (*count == 2 || *cursor++ != '"') return FALSE;
+    const gchar *end = strchr (cursor, '"');
+    if (!end) return FALSE;
+    gchar *tuple = g_strndup (cursor, end - cursor);
+    gchar *port, *host = tuple;
+    if (*host == '[') {
+      gchar *close = strchr (host, ']');
+      if (!close || close[1] != ':') { g_free (tuple); return FALSE; }
+      *close = 0; host++;
+      GInetAddress *ip = g_inet_address_new_from_string (host);
+      if (!ip || g_inet_address_get_family (ip) != G_SOCKET_FAMILY_IPV6) {
+        g_clear_object (&ip); g_free (tuple); return FALSE;
+      }
+      g_object_unref (ip); port = close + 2;
+    } else {
+      port = strchr (host, ':');
+      if (!port) { g_free (tuple); return FALSE; }
+      *port++ = 0;
+      for (gchar *c = host; *c; c++)
+        if (!g_ascii_isalnum (*c) && *c != '-' && *c != '.' && *c != '_') {
+          g_free (tuple); return FALSE;
+        }
+    }
+    guint64 number;
+    if (!g_ascii_string_to_unsigned (port, 10, 0, 65535, &number, NULL)) {
+      g_free (tuple); return FALSE;
+    }
+    addresses[*count].host = g_strdup (host);
+    addresses[(*count)++].port = number;
+    g_free (tuple);
+    cursor = end + 1;
+    if (*cursor && *cursor++ != '/') return FALSE;
+    if (!*cursor && end[1] == '/') return FALSE;
+  }
+  return *count != 0;
+}
 
 /**
  * gst_rtsp_transport_parse:
@@ -459,6 +527,7 @@ gst_rtsp_transport_parse (const gchar * str, GstRTSPTransport * transport)
   down = g_ascii_strdown (str, -1);
 
   split = g_strsplit (down, ";", 0);
+  for (guint part = 0; split[part]; part++) g_strstrip (split[part]);
   g_free (down);
 
   /* First field contains the transport/profile/lower_transport */
@@ -488,6 +557,7 @@ gst_rtsp_transport_parse (const gchar * str, GstRTSPTransport * transport)
   }
 
   if (transp[count] != NULL) {
+    if (transp[count + 1] != NULL) goto invalid_transport;
     for (i = 0; ltrans[i].name; i++)
       if (strcmp (transp[count], ltrans[i].name) == 0)
         break;
@@ -539,8 +609,8 @@ gst_rtsp_transport_parse (const gchar * str, GstRTSPTransport * transport)
       transport->append = TRUE;
     } else if (g_str_has_prefix (split[i], "interleaved=")) {
       RTSP_TRANSPORT_PARAMETER_IS_UNIQUE (RTSP_TRANSPORT_INTERLEAVED);
-      parse_range (split[i] + 12, &transport->interleaved);
-      if (!IS_VALID_INTERLEAVE_RANGE (transport->interleaved))
+      if (!parse_range (split[i] + 12, &transport->interleaved) ||
+          !IS_VALID_INTERLEAVE_RANGE (transport->interleaved))
         goto invalid_transport;
     } else if (g_str_has_prefix (split[i], "ttl=")) {
       guint64 ttl;
@@ -550,38 +620,54 @@ gst_rtsp_transport_parse (const gchar * str, GstRTSPTransport * transport)
       transport->ttl = ttl;
     } else if (g_str_has_prefix (split[i], "port=")) {
       RTSP_TRANSPORT_PARAMETER_IS_UNIQUE (RTSP_TRANSPORT_PORT);
-      if (parse_range (split[i] + 5, &transport->port)) {
-        if (!IS_VALID_PORT_RANGE (transport->port))
-          goto invalid_transport;
-      }
+      if (!parse_range (split[i] + 5, &transport->port) ||
+          !IS_VALID_PORT_RANGE (transport->port))
+        goto invalid_transport;
     } else if (g_str_has_prefix (split[i], "client_port=")) {
       RTSP_TRANSPORT_PARAMETER_IS_UNIQUE (RTSP_TRANSPORT_CLIENT_PORT);
-      if (parse_range (split[i] + 12, &transport->client_port)) {
-        if (!IS_VALID_PORT_RANGE (transport->client_port))
-          goto invalid_transport;
-      }
+      if (!parse_range (split[i] + 12, &transport->client_port) ||
+          !IS_VALID_PORT_RANGE (transport->client_port))
+        goto invalid_transport;
     } else if (g_str_has_prefix (split[i], "server_port=")) {
       RTSP_TRANSPORT_PARAMETER_IS_UNIQUE (RTSP_TRANSPORT_SERVER_PORT);
-      if (parse_range (split[i] + 12, &transport->server_port)) {
-        if (!IS_VALID_PORT_RANGE (transport->server_port))
-          goto invalid_transport;
-      }
+      if (!parse_range (split[i] + 12, &transport->server_port) ||
+          !IS_VALID_PORT_RANGE (transport->server_port))
+        goto invalid_transport;
+    } else if (g_str_has_prefix (split[i], "dest_addr=")) {
+      RTSP_TRANSPORT_PARAMETER_IS_UNIQUE (RTSP_TRANSPORT_DEST_ADDR);
+      if (!parse_addresses (split[i] + 10, transport->dest_addr, &transport->dest_addr_count))
+        goto invalid_transport;
+    } else if (g_str_has_prefix (split[i], "src_addr=")) {
+      RTSP_TRANSPORT_PARAMETER_IS_UNIQUE (RTSP_TRANSPORT_SRC_ADDR);
+      if (!parse_addresses (split[i] + 9, transport->src_addr, &transport->src_addr_count))
+        goto invalid_transport;
+    } else if (!strcmp (split[i], "rtcp-mux")) {
+      RTSP_TRANSPORT_PARAMETER_IS_UNIQUE (RTSP_TRANSPORT_RTCP_MUX);
+      transport->rtcp_mux = TRUE;
     } else if (g_str_has_prefix (split[i], "ssrc=")) {
       guint64 ssrc;
       RTSP_TRANSPORT_PARAMETER_IS_UNIQUE (RTSP_TRANSPORT_SSRC);
-      if (!g_ascii_string_to_unsigned (split[i] + 5, 16, 0, G_MAXUINT, &ssrc,
-              NULL))
-        goto invalid_transport;
-      transport->ssrc = ssrc;
-    } else {
-      /* unknown field... */
-      if (strlen (split[i]) > 0) {
-        g_warning ("unknown transport field \"%s\"", split[i]);
+      gchar **values = g_strsplit (split[i] + 5, "/", 0);
+      transport->ssrcs = g_array_new (FALSE, FALSE, sizeof (guint32));
+      for (guint v = 0; values[v]; v++) {
+        if (!g_ascii_string_to_unsigned (values[v], 16, 0, G_MAXUINT, &ssrc, NULL)) {
+          g_strfreev (values);
+          goto invalid_transport;
+        }
+        if (strlen (values[v]) != 8) transport->runtime_ssrc_bad_width = TRUE;
+        guint32 value = ssrc;
+        g_array_append_val (transport->ssrcs, value);
       }
+      g_strfreev (values);
+      transport->ssrc = g_array_index (transport->ssrcs, guint32, 0);
+    } else {
+      transport->runtime_unknown_parameter = TRUE;
+
     }
     i++;
   }
   g_strfreev (split);
+  transport->runtime_parameters = transport_params;
 
   return GST_RTSP_OK;
 
@@ -596,6 +682,31 @@ invalid_transport:
     g_strfreev (split);
     return GST_RTSP_EINVAL;
   }
+}
+
+GstRTSPResult
+gst_rtsp_transport_parse_version (const gchar *text, GstRTSPVersion version,
+    GstRTSPTransport *transport)
+{
+  GstRTSPResult result = gst_rtsp_transport_parse (text, transport);
+  if (result != GST_RTSP_OK) return result;
+  if (transport->runtime_unknown_parameter || transport->trans != GST_RTSP_TRANS_RTP)
+    return GST_RTSP_ENOTIMPL;
+  if (version == GST_RTSP_VERSION_1_0) {
+    if (transport->dest_addr_count || transport->src_addr_count || transport->rtcp_mux ||
+        (transport->ssrcs && transport->ssrcs->len != 1)) return GST_RTSP_EPARSE;
+  } else if (version == GST_RTSP_VERSION_2_0) {
+    if (transport->runtime_ssrc_bad_width ||
+        !(transport->runtime_parameters & RTSP_TRANSPORT_DELIVERY) ||
+        transport->destination || transport->source || transport->append || transport->mode_record ||
+        transport->client_port.min != -1 || transport->server_port.min != -1 || transport->port.min != -1)
+      return GST_RTSP_EPARSE;
+    if (transport->interleaved.min != -1 && (transport->dest_addr_count || transport->src_addr_count))
+      return GST_RTSP_EPARSE;
+  } else return GST_RTSP_EINVAL;
+  if (transport->interleaved.min != -1 && transport->lower_transport != GST_RTSP_LOWER_TRANS_TCP)
+    return GST_RTSP_EPARSE;
+  return GST_RTSP_OK;
 }
 
 /**
@@ -666,6 +777,20 @@ gst_rtsp_transport_as_text (GstRTSPTransport * transport)
     g_ptr_array_add (strs, g_strdup (";source="));
     g_ptr_array_add (strs, g_strdup (transport->source));
   }
+
+  for (guint side = 0; side < 2; side++) {
+    guint count = side ? transport->src_addr_count : transport->dest_addr_count;
+    GstRTSPTransportAddress *addresses = side ? transport->src_addr : transport->dest_addr;
+    if (count > 2) goto invalid_transport;
+    for (guint i = 0; i < count; i++) {
+      if (!addresses[i].host) goto invalid_transport;
+      g_ptr_array_add (strs, g_strdup (i ? "/" : side ? ";src_addr=" : ";dest_addr="));
+      g_ptr_array_add (strs, strchr (addresses[i].host, ':')
+          ? g_strdup_printf ("\"[%s]:%u\"", addresses[i].host, addresses[i].port)
+          : g_strdup_printf ("\"%s:%u\"", addresses[i].host, addresses[i].port));
+    }
+  }
+  if (transport->rtcp_mux) g_ptr_array_add (strs, g_strdup (";RTCP-mux"));
 
   /* add the interleaved parameter */
   if (transport->lower_transport == GST_RTSP_LOWER_TRANS_TCP &&
@@ -739,8 +864,12 @@ gst_rtsp_transport_as_text (GstRTSPTransport * transport)
   }
 
   /* add the ssrc parameter */
-  if (transport->lower_transport != GST_RTSP_LOWER_TRANS_UDP_MCAST &&
-      transport->ssrc != 0) {
+  if (transport->ssrcs && transport->ssrcs->len) {
+    for (guint i = 0; i < transport->ssrcs->len; i++) {
+      g_ptr_array_add (strs, g_strdup (i ? "/" : ";ssrc="));
+      g_ptr_array_add (strs, g_strdup_printf ("%08X", g_array_index (transport->ssrcs, guint32, i)));
+    }
+  } else if (transport->lower_transport != GST_RTSP_LOWER_TRANS_UDP_MCAST && transport->ssrc != 0) {
     g_ptr_array_add (strs, g_strdup (";ssrc="));
     g_ptr_array_add (strs, g_strdup_printf ("%08X", transport->ssrc));
   }

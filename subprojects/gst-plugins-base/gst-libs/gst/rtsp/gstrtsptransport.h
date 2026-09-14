@@ -144,6 +144,11 @@ struct _GstRTSPRange {
  * A structure holding the RTSP transport values.
  */
 
+typedef struct {
+  gchar *host;
+  guint16 port;
+} GstRTSPTransportAddress;
+
 struct _GstRTSPTransport {
   GstRTSPTransMode  trans;
   GstRTSPProfile    profile;
@@ -167,6 +172,13 @@ struct _GstRTSPTransport {
   /* RTP specific */
   guint          ssrc;
 
+  /* RTSP 2 RTP address tuples: RTP followed by optional RTCP. */
+  GstRTSPTransportAddress dest_addr[2], src_addr[2];
+  guint dest_addr_count, src_addr_count;
+  gboolean rtcp_mux;
+  GArray *ssrcs;
+  guint runtime_parameters;
+  gboolean runtime_unknown_parameter, runtime_ssrc_bad_width;
   /*< private >*/
   gpointer _gst_reserved[GST_PADDING];
 };
@@ -179,6 +191,10 @@ GstRTSPResult      gst_rtsp_transport_init         (GstRTSPTransport *transport)
 
 GST_RTSP_API
 GstRTSPResult      gst_rtsp_transport_parse        (const gchar *str, GstRTSPTransport *transport);
+
+GST_RTSP_API
+GstRTSPResult      gst_rtsp_transport_parse_version (const gchar *str, GstRTSPVersion version,
+                                                    GstRTSPTransport *transport);
 
 GST_RTSP_API
 gchar*             gst_rtsp_transport_as_text      (GstRTSPTransport *transport) G_GNUC_WARN_UNUSED_RESULT;
