@@ -3890,6 +3890,9 @@ rtp_session_next_timeout (RTPSession * sess, GstClockTime current_time)
   if (GST_CLOCK_TIME_IS_VALID (sess->next_early_rtcp_time)) {
     GST_DEBUG ("have early rtcp time");
     result = sess->next_early_rtcp_time;
+    if (GST_CLOCK_TIME_IS_VALID (sess->next_rtcp_check_time)
+        && sess->next_rtcp_check_time < result)
+      result = sess->next_rtcp_check_time;
     goto early_exit;
   }
 
@@ -4539,7 +4542,9 @@ is_rtcp_time (RTPSession * sess, GstClockTime current_time, ReportData * data)
   else
     stats = &sess->stats;
 
-  if (GST_CLOCK_TIME_IS_VALID (sess->next_early_rtcp_time))
+  if (GST_CLOCK_TIME_IS_VALID (sess->next_early_rtcp_time)
+      && (!GST_CLOCK_TIME_IS_VALID (sess->next_rtcp_check_time)
+          || sess->next_early_rtcp_time < sess->next_rtcp_check_time))
     data->is_early = TRUE;
   else
     data->is_early = FALSE;
@@ -5030,9 +5035,15 @@ rtp_session_request_early_rtcp (RTPSession * sess, GstClockTime current_time,
 
   RTP_SESSION_LOCK (sess);
 
-  /* We assume a feedback profile if something is requesting RTCP
-   * to be sent */
-  sess->rtp_profile = GST_RTP_PROFILE_AVPF;
+  /* A send request cannot change the explicitly negotiated RTP profile.
+   * AVP/SAVP can only use a regular transmission already due in this window. */
+  if (sess->rtp_profile != GST_RTP_PROFILE_AVPF
+      && sess->rtp_profile != GST_RTP_PROFILE_SAVPF) {
+    ret = GST_CLOCK_TIME_IS_VALID (sess->next_rtcp_check_time)
+        && sess->next_rtcp_check_time >= current_time
+        && sess->next_rtcp_check_time - current_time <= max_delay;
+    goto end;
+  }
 
   /* Check if already requested */
   /*  RFC 4585 section 3.5.2 step 2 */
