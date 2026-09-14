@@ -15,6 +15,12 @@ typedef enum
   GST_RUNTIME_PAYLOAD_PCMU
 } GstRuntimePayloadFormat;
 typedef struct _GstRuntimePayload GstRuntimePayload;
+GST_API
+GstElement *gst_runtime_payload_transform_new (GstRuntimePayloadFormat format, gboolean sending,
+                                               guint pt, guint32 ssrc, guint16 sequence,
+                                               guint32 timestamp, guint mtu);
+GST_API
+GstCaps *gst_runtime_payload_output_caps (GstRuntimePayloadFormat format);
 /* Caps are supplied as typed native data, never as a pipeline expression.
  * This stage transforms already encoded frames; it never encodes or decodes. */
 GST_API

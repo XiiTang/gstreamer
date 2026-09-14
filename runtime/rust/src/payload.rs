@@ -53,7 +53,7 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 #[repr(C)]
-struct Settings {
+pub(crate) struct Settings {
     format: i32,
     sending: i32,
     payload_type: u32,
@@ -133,6 +133,26 @@ pub struct Frame {
 }
 pub fn open(c: &Configuration<'_>) -> Result<(Control, Input, Output), Error> {
     crate::initialize();
+    let raw = with_settings(c, |settings| unsafe {
+        gst_runtime_payload_create(settings)
+    })?;
+    let inner = Arc::new(Inner(NonNull::new(raw).ok_or(Error::Configuration)?));
+    Ok((
+        Control(inner.clone()),
+        Input {
+            inner: inner.clone(),
+            _exclusive: PhantomData,
+        },
+        Output {
+            inner,
+            _exclusive: PhantomData,
+        },
+    ))
+}
+pub(crate) fn with_settings<T>(
+    c: &Configuration<'_>,
+    use_settings: impl FnOnce(&Settings) -> T,
+) -> Result<T, Error> {
     let parameters = [c.h264_parameter_sets, c.h265_vps, c.h265_sps, c.h265_pps].map(CString::new);
     let parameters = parameters
         .into_iter()
@@ -157,21 +177,7 @@ pub fn open(c: &Configuration<'_>) -> Result<(Control, Input, Output), Error> {
         h265_sps: parameters[2].as_ptr(),
         h265_pps: parameters[3].as_ptr(),
     };
-    let inner = Arc::new(Inner(
-        NonNull::new(unsafe { gst_runtime_payload_create(&settings) })
-            .ok_or(Error::Configuration)?,
-    ));
-    Ok((
-        Control(inner.clone()),
-        Input {
-            inner: inner.clone(),
-            _exclusive: PhantomData,
-        },
-        Output {
-            inner,
-            _exclusive: PhantomData,
-        },
-    ))
+    Ok(use_settings(&settings))
 }
 impl Input {
     pub fn push(
@@ -218,18 +224,23 @@ impl Output {
         if code != 0 {
             return Err(Error::Flow(code));
         }
-        let frame = NativeFrame(NonNull::new(frame).expect("Native payload frame contract"));
-        let mut view = FrameView::default();
-        unsafe { gst_runtime_payload_frame_view(frame.0.as_ptr(), &mut view) };
-        let data = if view.length == 0 {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(view.data, view.length) }.to_vec()
-        };
-        Ok(Some(Frame {
-            data,
-            pts: (view.pts != u64::MAX).then_some(view.pts),
-            duration: (view.duration != u64::MAX).then_some(view.duration),
-        }))
+        unsafe { take_frame(frame) }.map(Some)
     }
+}
+
+/// Takes the native sample lease, copies its public media bytes, then unmaps.
+pub(crate) unsafe fn take_frame(raw: *mut c_void) -> Result<Frame, Error> {
+    let frame = NativeFrame(NonNull::new(raw).ok_or(Error::Flow(-5))?);
+    let mut view = FrameView::default();
+    unsafe { gst_runtime_payload_frame_view(frame.0.as_ptr(), &mut view) };
+    let data = if view.length == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(view.data, view.length) }.to_vec()
+    };
+    Ok(Frame {
+        data,
+        pts: (view.pts != u64::MAX).then_some(view.pts),
+        duration: (view.duration != u64::MAX).then_some(view.duration),
+    })
 }

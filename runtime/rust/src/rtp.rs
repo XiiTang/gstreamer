@@ -8,14 +8,16 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-#[derive(Debug, Clone, Copy)]
-pub struct Configuration {
+#[derive(Clone, Copy)]
+pub struct Configuration<'a> {
     pub ssrc: u32,
     pub payload_type: u8,
     pub clock_rate: u32,
     pub probation: u32,
     pub reports: Option<Duration>,
     pub feedback_profile: bool,
+    pub payload: Option<&'a crate::payload::Configuration<'a>>,
+    pub reorder_latency: Option<Duration>,
 }
 #[derive(Debug, Clone, Copy)]
 #[repr(i32)]
@@ -48,6 +50,9 @@ struct Settings {
     rtcp_min_interval: u64,
     reports: i32,
     feedback_profile: i32,
+    payload: *const crate::payload::Settings,
+    reorder: i32,
+    latency_ms: u32,
 }
 unsafe extern "C" {
     fn gst_runtime_rtp_session_new(settings: *const Settings) -> *mut c_void;
@@ -57,13 +62,18 @@ unsafe extern "C" {
         data: *const u8,
         length: usize,
     ) -> i32;
-    fn gst_runtime_rtp_session_read(
+    fn gst_runtime_rtp_session_try_write_frame(
+        session: *mut c_void,
+        data: *const u8,
+        length: usize,
+        pts: u64,
+        duration: u64,
+    ) -> i32;
+    fn gst_runtime_rtp_session_pull(
         session: *mut c_void,
         port: i32,
-        data: *mut u8,
-        capacity: usize,
-        length: *mut usize,
         timeout: u64,
+        frame: *mut *mut c_void,
     ) -> i32;
     fn gst_runtime_rtp_session_report(session: *mut c_void, delay: u64) -> i32;
     fn gst_runtime_rtp_session_stats(session: *mut c_void) -> *mut c_char;
@@ -98,9 +108,9 @@ impl Drop for Session {
     }
 }
 impl Session {
-    pub fn new(c: Configuration) -> Result<Self, Error> {
+    pub fn new(c: Configuration<'_>) -> Result<Self, Error> {
         crate::initialize();
-        let settings = Settings {
+        let mut settings = Settings {
             ssrc: c.ssrc,
             payload_type: c.payload_type.into(),
             clock_rate: c.clock_rate,
@@ -111,9 +121,22 @@ impl Session {
                 .map_err(|_| Error(-5))?,
             reports: i32::from(c.reports.is_some()),
             feedback_profile: i32::from(c.feedback_profile),
+            payload: std::ptr::null(),
+            reorder: i32::from(c.reorder_latency.is_some()),
+            latency_ms: c
+                .reorder_latency
+                .map_or(Ok(0), |d| u32::try_from(d.as_millis()))
+                .map_err(|_| Error(-5))?,
         };
-        let raw =
-            NonNull::new(unsafe { gst_runtime_rtp_session_new(&settings) }).ok_or(Error(-5))?;
+        let raw = match c.payload {
+            Some(payload) => crate::payload::with_settings(payload, |native| {
+                settings.payload = native;
+                unsafe { gst_runtime_rtp_session_new(&settings) }
+            })
+            .map_err(|_| Error(-5))?,
+            None => unsafe { gst_runtime_rtp_session_new(&settings) },
+        };
+        let raw = NonNull::new(raw).ok_or(Error(-5))?;
         Ok(Self {
             inner: Arc::new(Inner(raw)),
             _exclusive: PhantomData,
@@ -137,23 +160,33 @@ impl Session {
             code => Err(Error(code)),
         }
     }
-    pub fn try_read(&mut self, port: Output) -> Result<Option<Vec<u8>>, Error> {
-        let mut buffer = vec![0; 65536];
-        let mut length = 0;
+    pub fn try_write_frame(
+        &mut self,
+        bytes: &[u8],
+        pts: u64,
+        duration: Option<u64>,
+    ) -> Result<bool, Error> {
         match unsafe {
-            gst_runtime_rtp_session_read(
+            gst_runtime_rtp_session_try_write_frame(
                 self.inner.0.as_ptr(),
-                port as _,
-                buffer.as_mut_ptr(),
-                buffer.len(),
-                &mut length,
-                0,
+                bytes.as_ptr(),
+                bytes.len(),
+                pts,
+                duration.unwrap_or(u64::MAX),
             )
         } {
-            0 => {
-                buffer.truncate(length);
-                Ok(Some(buffer))
-            }
+            0 => Ok(true),
+            1 => Ok(false),
+            code => Err(Error(code)),
+        }
+    }
+    pub fn try_read(&mut self, port: Output) -> Result<Option<crate::payload::Frame>, Error> {
+        let mut raw = std::ptr::null_mut();
+        match unsafe { gst_runtime_rtp_session_pull(self.inner.0.as_ptr(), port as _, 0, &mut raw) }
+        {
+            0 => unsafe { crate::payload::take_frame(raw) }
+                .map(Some)
+                .map_err(|_| Error(-5)),
             1 => Ok(None),
             code => Err(Error(code)),
         }
@@ -186,6 +219,8 @@ mod tests {
             probation: 0,
             reports: None,
             feedback_profile: false,
+            payload: None,
+            reorder_latency: None,
         })
         .unwrap();
         let packet = [128, 96, 0, 1, 0, 0, 0, 1, 0, 0, 0, 7, 9];
@@ -193,7 +228,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         loop {
             if let Some(result) = s.try_read(Output::SendRtp).unwrap() {
-                assert_eq!(result, packet);
+                assert_eq!(result.data, packet);
                 break;
             }
             assert!(std::time::Instant::now() < deadline);

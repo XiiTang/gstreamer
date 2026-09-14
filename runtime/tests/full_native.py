@@ -22,5 +22,6 @@ subprocess.run([str(a.output/'payload'),str(a.output)],env=env,check=True)
 for name,fmt in [('h264','h264'),('h265','hevc'),('jpeg','mjpeg')]:
  def pixels(path):return subprocess.check_output(['ffmpeg','-v','error','-f',fmt,'-i',str(path),'-f','rawvideo','-pix_fmt','yuv420p','-'])
  assert pixels(a.output/name)==pixels(a.output/(name+'.recovered')),name
- print('PASS independent decoded pixels:',name)
+ assert pixels(a.output/name)==pixels(a.output/(name+'.recovered.session')),name
+ print('PASS independent decoded pixels for standalone and shared session:',name)
 assert not registry.exists(),'Private media build read/wrote a filesystem registry'

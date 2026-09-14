@@ -19,6 +19,28 @@ static const gchar *factories[][2] = { { NULL, NULL },
                                        { "rtpmp4gdepay", "rtpmp4gpay" },
                                        { "rtppcmadepay", "rtppcmapay" },
                                        { "rtppcmudepay", "rtppcmupay" } };
+GstElement *
+gst_runtime_payload_transform_new (GstRuntimePayloadFormat format, gboolean sending, guint pt,
+                                   guint32 ssrc, guint16 sequence, guint32 timestamp, guint mtu)
+{
+  if (format <= GST_RUNTIME_PAYLOAD_RAW || format > GST_RUNTIME_PAYLOAD_PCMU || pt > 127 || mtu < 28
+      || mtu > 65507)
+    return NULL;
+  GstElement *element = gst_element_factory_make (factories[format][!!sending], NULL);
+  if (element && sending)
+    g_object_set (element, "pt", pt, "ssrc", ssrc, "seqnum-offset", (gint)sequence,
+                  "timestamp-offset", timestamp, "mtu", mtu, NULL);
+  return element;
+}
+GstCaps *
+gst_runtime_payload_output_caps (GstRuntimePayloadFormat format)
+{
+  if (format != GST_RUNTIME_PAYLOAD_H264 && format != GST_RUNTIME_PAYLOAD_H265)
+    return NULL;
+  return gst_caps_new_simple (format == GST_RUNTIME_PAYLOAD_H264 ? "video/x-h264" : "video/x-h265",
+                              "stream-format", G_TYPE_STRING, "byte-stream", "alignment",
+                              G_TYPE_STRING, "au", NULL);
+}
 GstRuntimePayload *
 gst_runtime_payload_new (GstRuntimePayloadFormat format, gboolean sending, const GstCaps *caps,
                          guint payload_type, guint32 ssrc, guint16 sequence, guint32 timestamp,
@@ -36,7 +58,8 @@ gst_runtime_payload_new (GstRuntimePayloadFormat format, gboolean sending, const
              *sink = gst_element_factory_make ("appsink", NULL);
   GstElement *transform = format == GST_RUNTIME_PAYLOAD_RAW
                               ? NULL
-                              : gst_element_factory_make (factories[format][!!sending], NULL);
+                              : gst_runtime_payload_transform_new (format, sending, payload_type,
+                                                                   ssrc, sequence, timestamp, mtu);
   payload->pipeline = gst_pipeline_new (NULL);
   if (!source || !sink || (format != GST_RUNTIME_PAYLOAD_RAW && !transform))
     {
@@ -61,18 +84,13 @@ gst_runtime_payload_new (GstRuntimePayloadFormat format, gboolean sending, const
   gst_app_sink_set_max_buffers (payload->sink, 8);
   gst_app_sink_set_max_bytes (payload->sink, 16 * 1024 * 1024);
   gst_app_sink_set_drop (payload->sink, FALSE);
-  if (!sending && (format == GST_RUNTIME_PAYLOAD_H264 || format == GST_RUNTIME_PAYLOAD_H265))
+  GstCaps *output = !sending ? gst_runtime_payload_output_caps (format) : NULL;
+  if (output)
     {
-      GstCaps *output = gst_caps_new_simple (
-          format == GST_RUNTIME_PAYLOAD_H264 ? "video/x-h264" : "video/x-h265", "stream-format",
-          G_TYPE_STRING, "byte-stream", "alignment", G_TYPE_STRING, "au", NULL);
       gst_app_sink_set_caps (payload->sink, output);
       gst_caps_unref (output);
     }
 
-  if (transform && sending)
-    g_object_set (transform, "pt", payload_type, "ssrc", ssrc, "seqnum-offset", (gint)sequence,
-                  "timestamp-offset", timestamp, "mtu", mtu, NULL);
   gst_bin_add_many (GST_BIN (payload->pipeline), source, sink, NULL);
   gboolean linked;
   if (transform)

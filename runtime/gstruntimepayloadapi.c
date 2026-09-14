@@ -11,8 +11,8 @@ parameter (GstCaps *caps, const gchar *name, const gchar *value)
   if (value && value[0])
     gst_caps_set_simple (caps, name, G_TYPE_STRING, value, NULL);
 }
-GstRuntimePayload *
-gst_runtime_payload_create (const GstRuntimePayloadSettings *s)
+GstCaps *
+gst_runtime_payload_caps (const GstRuntimePayloadSettings *s)
 {
   if (!s || s->format < 0 || s->format > GST_RUNTIME_PAYLOAD_PCMU || !s->clock_rate
       || s->clock_rate > G_MAXINT || s->channels > 255 || s->sequence > G_MAXUINT16
@@ -96,6 +96,14 @@ gst_runtime_payload_create (const GstRuntimePayloadSettings *s)
       if (s->format == GST_RUNTIME_PAYLOAD_OPUS)
         gst_caps_set_simple (caps, "channel-mapping-family", G_TYPE_INT, 0, NULL);
     }
+  return caps;
+}
+GstRuntimePayload *
+gst_runtime_payload_create (const GstRuntimePayloadSettings *s)
+{
+  GstCaps *caps = gst_runtime_payload_caps (s);
+  if (!caps)
+    return NULL;
   GError *error = NULL;
   GstRuntimePayload *result
       = gst_runtime_payload_new (s->format, s->sending, caps, s->payload_type, s->ssrc, s->sequence,
@@ -130,17 +138,25 @@ gst_runtime_payload_read (GstRuntimePayload *payload, guint64 timeout, GstRuntim
         }
       return 1;
     }
+  *out = gst_runtime_payload_frame_take (sample);
+  return *out ? 0 : GST_FLOW_ERROR;
+}
+GstRuntimePayloadFrame *
+gst_runtime_payload_frame_take (GstSample *sample)
+{
+  if (!sample)
+    return NULL;
   GstRuntimePayloadFrame *frame = g_new0 (GstRuntimePayloadFrame, 1);
   frame->sample = sample;
   if (!gst_buffer_map (gst_sample_get_buffer (sample), &frame->map, GST_MAP_READ))
     {
       gst_sample_unref (sample);
       g_free (frame);
-      return GST_FLOW_ERROR;
+      return NULL;
     }
-  *out = frame;
-  return 0;
+  return frame;
 }
+
 void
 gst_runtime_payload_frame_view (GstRuntimePayloadFrame *frame, GstRuntimePayloadFrameView *view)
 {
