@@ -195,6 +195,17 @@ impl State {
         };
         if let Some(schedule) = self.schedules.get_mut(&pending.session) {
             if (200..300).contains(&message.status) {
+                if let (Some(authentication), Some((previous, next))) = (
+                    schedule.options.authentication.as_mut(),
+                    message
+                        .authentication
+                        .as_ref()
+                        .and_then(|a| a.verified_continuation.as_ref()),
+                ) {
+                    if authentication.challenge == *previous {
+                        authentication.challenge.clone_from(next);
+                    }
+                }
                 if let Some(next) = Instant::now().checked_add(schedule.options.interval) {
                     schedule.next = next;
                 } else {

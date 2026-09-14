@@ -299,3 +299,147 @@ fn maintenance_waits_for_explicit_control_and_stops_after_teardown() {
     assert!(matches!(event.kind, KeepaliveEventKind::SessionEnded));
     assert_eq!(peer.requests.try_iter().count(), 1);
 }
+
+#[test]
+fn declared_digest_cycle_follows_only_verified_nonce_continuation() {
+    use imapipe_media::{
+        rtsp::KeepaliveAuthentication,
+        rtsp_auth::{Algorithm, Policy, Qop},
+    };
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+    use zeroize::Zeroizing;
+    fn request(peer: &mut UnixStream) -> String {
+        let mut bytes = Vec::new();
+        while !bytes.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            peer.read_exact(&mut byte).unwrap();
+            bytes.push(byte[0]);
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+    for (version, wire) in [(Version::V1, "1.0"), (Version::V2, "2.0")] {
+        for (qop, qop_wire) in [(Qop::Auth, "auth"), (Qop::AuthInt, "auth-int")] {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            server
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut native = Rtsp::from_stream(client.into(), URI, version, 4096).unwrap();
+            native
+                .configure_authentication(
+                    Zeroizing::new("user".into()),
+                    Zeroizing::new("frozen-password".into()),
+                    Policy {
+                        basic: false,
+                        algorithms: vec![Algorithm::Sha256],
+                        qops: vec![qop],
+                        realm: Some("camera".into()),
+                        require_server_proof: true,
+                    },
+                    false,
+                )
+                .unwrap();
+            native
+                .request(
+                    "SETUP",
+                    URI,
+                    &[("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")],
+                    &[],
+                    Duration::from_secs(1),
+                )
+                .0
+                .unwrap();
+            request(&mut server);
+            server.write_all(format!("RTSP/{wire} 200 OK\r\nCSeq: 1\r\nSession: s\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n").as_bytes()).unwrap();
+            receive(&mut native);
+            native
+                .request("OPTIONS", URI, &[], &[], Duration::from_secs(1))
+                .0
+                .unwrap();
+            request(&mut server);
+            server.write_all(format!("RTSP/{wire} 401 Unauthorized\r\nCSeq: 2\r\nWWW-Authenticate: Digest realm=\"camera\",nonce=\"nonce-one\",algorithm=SHA-256,qop=\"{qop_wire}\"\r\n\r\n").as_bytes()).unwrap();
+            let (result, challenge) = native.receive(Duration::from_secs(1));
+            result.unwrap();
+            let challenge = challenge.authentication.unwrap().challenges.remove(0).id;
+            let mut options = configuration(KeepaliveMethod::GetParameter);
+            options.authentication = Some(KeepaliveAuthentication { challenge, qop });
+            native.configure_keepalive("s", Some(options)).unwrap();
+            for (sequence, nonce) in [(3, "nonce-one"), (4, "nonce-two"), (5, "nonce-two")] {
+                let deadline = Instant::now() + Duration::from_secs(1);
+                loop {
+                    if let Some(event) = native.keepalive_step().unwrap() {
+                        if matches!(event.kind, KeepaliveEventKind::Sent) {
+                            break;
+                        }
+                    }
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                let sent = request(&mut server);
+                assert!(sent.starts_with("GET_PARAMETER "));
+                let header = sent
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Authorization: Digest "))
+                    .unwrap();
+                let fields: BTreeMap<_, _> = header
+                    .split(',')
+                    .map(|field| {
+                        let (key, value) = field.trim().split_once('=').unwrap();
+                        (key, value.trim_matches('"'))
+                    })
+                    .collect();
+                assert_eq!(fields["nonce"], nonce);
+                assert_eq!(fields["qop"], qop_wire);
+                assert_eq!(
+                    fields["nc"],
+                    if sequence == 5 {
+                        "00000002"
+                    } else {
+                        "00000001"
+                    }
+                );
+                let ha1 = hash(b"user:camera:frozen-password");
+                let body_hash = if qop == Qop::AuthInt {
+                    format!(":{}", hash(b""))
+                } else {
+                    String::new()
+                };
+                let digest = |a2: &str| {
+                    hash(
+                        format!(
+                            "{ha1}:{nonce}:{}:{}:{qop_wire}:{}",
+                            fields["nc"],
+                            fields["cnonce"],
+                            hash(a2.as_bytes())
+                        )
+                        .as_bytes(),
+                    )
+                };
+                assert_eq!(
+                    fields["response"],
+                    digest(&format!("GET_PARAMETER:{URI}{body_hash}"))
+                );
+                if sequence == 5 {
+                    // A fresh challenge is visible, but never silently selected by maintenance.
+                    server.write_all(format!("RTSP/{wire} 401 Unauthorized\r\nCSeq: {sequence}\r\nWWW-Authenticate: Digest realm=\"camera\",nonce=\"nonce-three\",algorithm=SHA-256,qop=\"{qop_wire}\"\r\n\r\n").as_bytes()).unwrap();
+                } else {
+                    let next = if sequence == 3 {
+                        ", nextnonce=\"nonce-two\""
+                    } else {
+                        ""
+                    };
+                    server.write_all(format!("RTSP/{wire} 200 OK\r\nCSeq: {sequence}\r\nAuthentication-Info: rspauth=\"{}\", qop={qop_wire}, cnonce=\"{}\", nc={}{next}\r\n\r\n",digest(&format!(":{URI}{body_hash}")),fields["cnonce"],fields["nc"]).as_bytes()).unwrap();
+                }
+                receive(&mut native);
+            }
+            assert!(!native.keepalive_status("s").unwrap().enabled);
+            pump(&mut native, Duration::from_millis(30)).unwrap();
+            server.set_nonblocking(true).unwrap();
+            assert_eq!(
+                server.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+}
