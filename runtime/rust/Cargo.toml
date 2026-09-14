@@ -20,3 +20,6 @@ sha2 = "0.10"
 http-auth = { git = "https://github.com/XiiTang/http-auth", rev = "428c056d7e1781888945731d35e17e87bcfa5a86" }
 zeroize = "1.8"
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+sha2 = "0.10"

@@ -64,6 +64,8 @@ pub struct Observation {
     pub challenges: Vec<Challenge>,
     pub server_proof: Option<bool>,
     pub protected_headers: bool,
+    /// Only a verified continuation of the same Digest context, never a new challenge.
+    pub(crate) verified_continuation: Option<(String, String)>,
 }
 enum Mechanism {
     Basic(BasicClient),
@@ -311,6 +313,8 @@ impl Auth {
                             .map_err(|_| Error::AUTHENTICATION)?;
                         // Explicit subsequent requests select the newly observed handle.
                         offered.summary.id = uuid::Uuid::new_v4().to_string();
+                        observation.verified_continuation =
+                            Some((context.clone(), offered.summary.id.clone()));
                         offered.summary.stale = false;
                         observation.challenges.push(offered.summary.clone());
                     }

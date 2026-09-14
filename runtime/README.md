@@ -116,3 +116,8 @@ message path. A partial-write/response timeout preserves dispatch uncertainty an
 cancels the control owner. The cancellation handle stops future cycles while an
 already dispatched request retains its deadline; this also covers an abandoned
 configuration handoff. Local timer passage never asserts remote session expiry.
+An already selected Digest cycle follows verified `Authentication-Info` nonce
+continuation within that same context, preserving qop and frozen identity. A new
+401 challenge still stops the cycle and requires an explicit selection. Native
+tests independently verify SHA-256 request and response proofs, nonce-count reset
+and subsequent increment for both RTSP versions and auth/auth-int.
