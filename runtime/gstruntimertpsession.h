@@ -17,6 +17,10 @@ GstRuntimeRtpSession *gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *
 GST_API
 int gst_runtime_rtp_session_write (GstRuntimeRtpSession *session, int port, const guint8 *data,
                                    gsize length);
+/* Nonblocking admission: 1 means the bounded native input queue is full. */
+GST_API
+int gst_runtime_rtp_session_try_write (GstRuntimeRtpSession *session, int port, const guint8 *data,
+                                       gsize length);
 /* Output ports: 0 outbound RTP, 1 accepted inbound RTP, 2 generated RTCP.
  * 0=packet, 1=timeout, negative=flow/error; native errors stop this session. */
 GST_API

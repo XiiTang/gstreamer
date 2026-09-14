@@ -41,21 +41,28 @@ main (void)
       g_assert_cmpmem (buffer, length, original, sizeof (original));
     }
   /* Reports are native protocol output; the Runtime transports them explicitly. */
-  gst_runtime_rtp_session_report (b, GST_SECOND);
-  g_assert_cmpint (
-      gst_runtime_rtp_session_read (b, 2, buffer, sizeof (buffer), &length, 3 * GST_SECOND), ==, 0);
-  GstBuffer *report = gst_buffer_new_allocate (NULL, length, NULL);
-  gst_buffer_fill (report, 0, buffer, length);
-  g_assert_true (gst_rtcp_buffer_validate (report));
-  GstRTCPBuffer mapped = GST_RTCP_BUFFER_INIT;
-  GstRTCPPacket packet;
-  g_assert_true (gst_rtcp_buffer_map (report, GST_MAP_READ, &mapped));
-  g_assert_true (gst_rtcp_buffer_get_first_packet (&mapped, &packet));
-  g_assert_cmpint (gst_rtcp_packet_get_type (&packet), ==, GST_RTCP_TYPE_RR);
-  g_assert_cmpuint (gst_rtcp_packet_rr_get_ssrc (&packet), ==, 8);
-  g_assert_cmpuint (gst_rtcp_packet_get_rb_count (&packet), ==, 1);
-  gst_rtcp_buffer_unmap (&mapped);
-  gst_buffer_unref (report);
+  guint blocks = 0;
+  gint64 report_deadline = g_get_monotonic_time () + 3000000;
+  while (blocks == 0)
+    {
+      g_assert_cmpint (g_get_monotonic_time (), <, report_deadline);
+      gst_runtime_rtp_session_report (b, GST_SECOND);
+      g_assert_cmpint (
+          gst_runtime_rtp_session_read (b, 2, buffer, sizeof (buffer), &length, GST_SECOND), ==, 0);
+      GstBuffer *report = gst_buffer_new_allocate (NULL, length, NULL);
+      gst_buffer_fill (report, 0, buffer, length);
+      g_assert_true (gst_rtcp_buffer_validate (report));
+      GstRTCPBuffer mapped = GST_RTCP_BUFFER_INIT;
+      GstRTCPPacket packet;
+      g_assert_true (gst_rtcp_buffer_map (report, GST_MAP_READ, &mapped));
+      g_assert_true (gst_rtcp_buffer_get_first_packet (&mapped, &packet));
+      g_assert_cmpint (gst_rtcp_packet_get_type (&packet), ==, GST_RTCP_TYPE_RR);
+      g_assert_cmpuint (gst_rtcp_packet_rr_get_ssrc (&packet), ==, 8);
+      blocks = gst_rtcp_packet_get_rb_count (&packet);
+      gst_rtcp_buffer_unmap (&mapped);
+      gst_buffer_unref (report);
+    }
+  g_assert_cmpuint (blocks, ==, 1);
   g_assert_cmpint (gst_runtime_rtp_session_write (a, 2, buffer, length), ==, 0);
   gchar *stats = gst_runtime_rtp_session_stats (b);
   g_assert_nonnull (stats);

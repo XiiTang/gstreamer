@@ -12,6 +12,7 @@ struct _GstRuntimeRtpSession
   GstBus *bus;
   GstRuntimeRtpSettings settings;
   gint stopped;
+  GMutex writers[3];
 };
 static GstCaps *
 pt_map (GstElement *element, guint pt, GstRuntimeRtpSession *s)
@@ -55,6 +56,8 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
     return NULL;
   GstRuntimeRtpSession *s = g_new0 (GstRuntimeRtpSession, 1);
   s->settings = *settings;
+  for (int i = 0; i < 3; i++)
+    g_mutex_init (&s->writers[i]);
   s->pipeline = gst_pipeline_new (NULL);
   s->rtp = gst_element_factory_make ("rtpsession", NULL);
   if (!s->pipeline || !s->rtp)
@@ -79,7 +82,7 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
       GstCaps *caps = i == 2 ? gst_caps_new_empty_simple ("application/x-rtcp")
                              : pt_map (NULL, settings->payload_type, s);
       g_object_set (s->source[i], "caps", caps, "format", GST_FORMAT_TIME, "is-live", TRUE,
-                    "do-timestamp", TRUE, "block", TRUE, "max-buffers", (guint64)32, "max-bytes",
+                    "do-timestamp", TRUE, "block", FALSE, "max-buffers", (guint64)32, "max-bytes",
                     (guint64)(32 * 65536), "max-time", (guint64)0, NULL);
       gst_caps_unref (caps);
       g_object_set (s->sink[i], "sync", FALSE, "async", FALSE, "max-buffers", 32u, "drop", FALSE,
@@ -98,7 +101,8 @@ failed:
   return NULL;
 }
 int
-gst_runtime_rtp_session_write (GstRuntimeRtpSession *s, int port, const guint8 *data, gsize length)
+gst_runtime_rtp_session_try_write (GstRuntimeRtpSession *s, int port, const guint8 *data,
+                                   gsize length)
 {
   if (!s || port < 0 || port > 2 || !data || !length || length > 65535)
     return GST_FLOW_ERROR;
@@ -125,7 +129,25 @@ gst_runtime_rtp_session_write (GstRuntimeRtpSession *s, int port, const guint8 *
       gst_buffer_unref (buffer);
       return GST_FLOW_ERROR;
     }
-  return gst_app_src_push_buffer (GST_APP_SRC (s->source[port]), buffer);
+  g_mutex_lock (&s->writers[port]);
+  int result;
+  if (gst_app_src_get_current_level_buffers (GST_APP_SRC (s->source[port])) >= 32)
+    {
+      gst_buffer_unref (buffer);
+      result = 1;
+    }
+  else
+    result = gst_app_src_push_buffer (GST_APP_SRC (s->source[port]), buffer);
+  g_mutex_unlock (&s->writers[port]);
+  return result;
+}
+int
+gst_runtime_rtp_session_write (GstRuntimeRtpSession *s, int port, const guint8 *data, gsize length)
+{
+  int result;
+  while ((result = gst_runtime_rtp_session_try_write (s, port, data, length)) == 1)
+    g_usleep (1000);
+  return result;
 }
 int
 gst_runtime_rtp_session_read (GstRuntimeRtpSession *s, int port, guint8 *data, gsize capacity,
@@ -203,5 +225,7 @@ gst_runtime_rtp_session_free (GstRuntimeRtpSession *s)
   gst_clear_object (&s->engine);
   gst_clear_object (&s->bus);
   gst_clear_object (&s->pipeline);
+  for (int i = 0; i < 3; i++)
+    g_mutex_clear (&s->writers[i]);
   g_free (s);
 }
