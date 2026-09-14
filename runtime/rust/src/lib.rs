@@ -1,5 +1,6 @@
 //! Ownership adapters for the pinned private media library. Wire parsing,
 //! protocol transitions and media engines remain in the native library.
+pub mod dtls;
 mod ffi;
 pub mod payload;
 pub mod rtp;

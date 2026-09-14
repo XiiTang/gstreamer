@@ -88,6 +88,8 @@ struct _GstDtlsConnectionPrivate
   gboolean is_alive;
   gboolean keys_exported;
   gboolean peer_verified;
+  GstDtlsVerifyChain verify_chain;
+  gpointer verify_chain_data;
   gboolean started;
   GstClockID timeout_id;
 
@@ -1142,62 +1144,81 @@ openssl_poll (GstDtlsConnection * self, gboolean * notify_state, GError ** err)
   return flow_ret;
 }
 
+gboolean
+gst_dtls_connection_set_chain_verifier (GstDtlsConnection *self,
+    GstDtlsVerifyChain verify, gpointer data)
+{
+  gboolean valid;
+  g_return_val_if_fail (GST_IS_DTLS_CONNECTION (self), FALSE);
+  g_mutex_lock (&self->priv->mutex);
+  valid = !self->priv->started && verify != NULL;
+  if (valid) {
+    self->priv->verify_chain = verify;
+    self->priv->verify_chain_data = data;
+  }
+  g_mutex_unlock (&self->priv->mutex);
+  return valid;
+}
+
+static gboolean
+verify_presented_chain (GstDtlsConnection *self, X509_STORE_CTX *ctx)
+{
+  GstDtlsCertificateDer chain[16] = { { NULL, 0 } };
+  X509 *leaf = X509_STORE_CTX_get0_cert (ctx);
+  STACK_OF(X509) *untrusted = X509_STORE_CTX_get0_untrusted (ctx);
+  gsize count = 0, total = 0;
+  gboolean accepted = FALSE;
+  /* Bound native certificate material before crossing the owner boundary. */
+  for (int i = -1; i < MAX (0, sk_X509_num (untrusted)); i++) {
+    X509 *cert = i == -1 ? leaf : sk_X509_value (untrusted, i);
+    if (!cert)
+      goto done;
+    if (i >= 0 && X509_cmp (cert, leaf) == 0)
+      continue;
+    int length = i2d_X509 (cert, NULL);
+    if (length <= 0 || length > 65536 || count == G_N_ELEMENTS (chain)
+        || total + length > 1024 * 1024)
+      goto done;
+    guint8 *data = g_try_malloc (length), *cursor = data;
+    if (!data)
+      goto done;
+    if (i2d_X509 (cert, &cursor) != length) {
+      g_free (data);
+      goto done;
+    }
+    chain[count++] = (GstDtlsCertificateDer) { data, length };
+    total += length;
+  }
+  if (count)
+    accepted = self->priv->verify_chain (chain, count, self->priv->verify_chain_data);
+done:
+  for (gsize i = 0; i < count; i++)
+    g_free ((gpointer) chain[i].data);
+  return accepted;
+}
+
 static int
 openssl_verify_callback (int preverify_ok, X509_STORE_CTX * x509_ctx)
 {
-  GstDtlsConnection *self;
-  SSL *ssl;
-  BIO *bio;
-  gchar *pem = NULL;
-  gboolean accepted = FALSE;
-
-  ssl =
-      X509_STORE_CTX_get_ex_data (x509_ctx,
+  SSL *ssl = X509_STORE_CTX_get_ex_data (x509_ctx,
       SSL_get_ex_data_X509_STORE_CTX_idx ());
-  self = SSL_get_ex_data (ssl, connection_ex_index);
+  GstDtlsConnection *self = SSL_get_ex_data (ssl, connection_ex_index);
+  gboolean accepted = FALSE;
   g_return_val_if_fail (GST_IS_DTLS_CONNECTION (self), FALSE);
 
-  pem = _gst_dtls_x509_to_pem (X509_STORE_CTX_get0_cert (x509_ctx));
-
-  if (!pem) {
-    GST_WARNING_OBJECT (self,
-        "failed to convert received certificate to pem format");
+  if (self->priv->verify_chain) {
+    /* The owner verifies trust, validity, name and chain together at the leaf.
+     * This never bypasses OpenSSL's handshake signature verification. */
+    if (X509_STORE_CTX_get_error_depth (x509_ctx) != 0)
+      return TRUE;
+    accepted = verify_presented_chain (self, x509_ctx);
   } else {
-    bio = BIO_new (BIO_s_mem ());
-    if (bio) {
-      gint len;
-      gint read_len;
-
-      len =
-          X509_NAME_print_ex (bio,
-          X509_get_subject_name (X509_STORE_CTX_get0_cert (x509_ctx)), 1,
-          XN_FLAG_MULTILINE);
-
-      if (len > 0) {
-        gchar *buffer;
-
-        buffer = g_new (gchar, (gsize) len + 1);
-        read_len = BIO_read (bio, buffer, len);
-        if (read_len > 0) {
-          buffer[read_len] = '\0';
-          GST_DEBUG_OBJECT (self, "Peer certificate received:\n%s", buffer);
-        } else {
-          GST_DEBUG_OBJECT (self, "failed to read certificate subject");
-        }
-        g_free (buffer);
-      } else {
-        GST_DEBUG_OBJECT (self, "failed to read certificate subject");
-      }
-      BIO_free (bio);
-    } else {
-      GST_DEBUG_OBJECT (self, "failed to create certificate print membio");
+    gchar *pem = _gst_dtls_x509_to_pem (X509_STORE_CTX_get0_cert (x509_ctx));
+    if (pem) {
+      g_signal_emit (self, signals[SIGNAL_ON_PEER_CERTIFICATE], 0, pem, &accepted);
+      g_free (pem);
     }
-
-    g_signal_emit (self, signals[SIGNAL_ON_PEER_CERTIFICATE], 0, pem,
-        &accepted);
-    g_free (pem);
   }
-
   if (X509_STORE_CTX_get_error_depth (x509_ctx) == 0)
     self->priv->peer_verified = accepted;
   return accepted;

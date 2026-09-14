@@ -523,11 +523,12 @@ if building_full
     'runtime/gstruntimepayloadapi.c',
     'runtime/gstruntimesrtpapi.c',
     'runtime/gstruntimertpsession.c',
+    'runtime/gstruntimedtls.c',
     c_args: ['-DBUILDING_GST'] + gst_c_args,
     target_type: get_option('gst-full-target-type'),
     link_args: gstfull_link_args,
     link_whole : exposed_libs,
-    dependencies : [incdir_deps, glib_deps, all_plugins, giomodules_deps, dependency('libsrtp2')],
+    dependencies : [incdir_deps, glib_deps, all_plugins, giomodules_deps, dependency('libsrtp2'), dependency('openssl')],
     link_depends : link_deps,
     install : true,
   )
