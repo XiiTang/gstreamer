@@ -19,6 +19,8 @@ typedef struct
   guint64 pts, duration;
 } GstRuntimePayloadFrameView;
 GST_API
+GstCaps *gst_runtime_payload_caps (const GstRuntimePayloadSettings *settings);
+GST_API
 GstRuntimePayload *gst_runtime_payload_create (const GstRuntimePayloadSettings *settings);
 GST_API
 int gst_runtime_payload_write (GstRuntimePayload *payload, const guint8 *data, gsize length,
@@ -27,6 +29,9 @@ int gst_runtime_payload_write (GstRuntimePayload *payload, const guint8 *data, g
 GST_API
 int gst_runtime_payload_read (GstRuntimePayload *payload, guint64 timeout,
                               GstRuntimePayloadFrame **frame);
+/* Takes ownership of sample, including on failure. */
+GST_API
+GstRuntimePayloadFrame *gst_runtime_payload_frame_take (GstSample *sample);
 GST_API
 void gst_runtime_payload_frame_view (GstRuntimePayloadFrame *frame,
                                      GstRuntimePayloadFrameView *view);
