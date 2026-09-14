@@ -223,7 +223,8 @@ gst_dtls_connection_finalize (GObject * gobject)
   GstDtlsConnectionPrivate *priv = self->priv;
 
   cancel_timeout_locked (self);
-  g_thread_pool_free (priv->thread_pool, TRUE, TRUE);
+  if (priv->thread_pool)
+    g_thread_pool_free (priv->thread_pool, TRUE, TRUE);
   priv->thread_pool = NULL;
 
   SSL_free (priv->ssl);
@@ -577,6 +578,19 @@ gst_dtls_connection_stop (GstDtlsConnection * self)
     g_object_notify_by_pspec (G_OBJECT (self),
         properties[PROP_CONNECTION_STATE]);
   }
+}
+
+void
+gst_dtls_connection_stop_and_join (GstDtlsConnection *self)
+{
+  gst_dtls_connection_stop (self);
+  g_mutex_lock (&self->priv->mutex);
+  GThreadPool *pool = self->priv->thread_pool;
+  self->priv->thread_pool = NULL;
+  self->priv->started = TRUE;
+  g_mutex_unlock (&self->priv->mutex);
+  if (pool)
+    g_thread_pool_free (pool, TRUE, TRUE);
 }
 
 void
