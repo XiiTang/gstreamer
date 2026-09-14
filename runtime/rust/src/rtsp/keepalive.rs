@@ -240,7 +240,7 @@ impl State {
                 None
             };
             if let Some(error) = failure {
-                native.cancellation().cancel();
+                unsafe { crate::ffi::gst_runtime_rtsp_invalidate(native.inner.0.as_ptr()) };
                 if let Some(schedule) = self.schedules.get(&pending.session) {
                     schedule.cancel.cancel();
                 }
@@ -319,7 +319,7 @@ impl State {
             Err(error) => {
                 schedule.cancel.cancel();
                 if dispatch.may_have_been_sent {
-                    native.cancellation().cancel();
+                    unsafe { crate::ffi::gst_runtime_rtsp_invalidate(native.inner.0.as_ptr()) };
                     Err(KeepaliveFailure {
                         session,
                         dispatch,
