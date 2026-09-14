@@ -3,6 +3,7 @@
 mod ffi;
 pub mod payload;
 pub mod rtsp;
+pub mod srtp;
 use std::sync::Once;
 static INITIALIZE: Once = Once::new();
 pub fn initialize() {
