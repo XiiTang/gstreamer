@@ -433,7 +433,9 @@ static gboolean
 gst_rtp_rtx_send_queue_check_full (GstDataQueue * queue,
     guint visible, guint bytes, guint64 time, gpointer checkdata)
 {
-  return FALSE;
+  /* Bounded native retransmission delivery. Backpressure retains the input
+   * RTCP instead of accumulating an unbounded response queue. */
+  return visible >= 32 || bytes >= 32 * 65536;
 }
 
 static void
@@ -453,7 +455,7 @@ gst_rtp_rtx_send_push_out (GstRtpRtxSend * rtx, gpointer object)
 
   data = g_new0 (GstDataQueueItem, 1);
   data->object = GST_MINI_OBJECT (object);
-  data->size = 1;
+  data->size = GST_IS_BUFFER (object) ? gst_buffer_get_size (object) : 0;
   data->duration = 1;
   data->visible = TRUE;
   data->destroy = gst_rtp_rtx_data_queue_item_free;

@@ -1,4 +1,5 @@
 #include "gstruntimertpsession.h"
+#include "../subprojects/gst-plugins-good/gst/rtpmanager/rtpsession.h"
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/rtp/gstrtcpbuffer.h>
@@ -9,7 +10,8 @@ struct _GstRuntimeRtpSession
 {
   GstElement *pipeline, *rtp, *source[3], *sink[3];
   GObject *engine;
-  GstElement *encoder, *decoder, *jitter;
+  GstElement *encoder, *decoder, *jitter, *rtx_send, *rtx_receive;
+  GstRuntimeRtxSettings rtx;
   GstCaps *rtp_caps;
   gboolean encoded;
   GstBus *bus;
@@ -21,16 +23,42 @@ static GstCaps *
 pt_map (GstElement *element, guint pt, GstRuntimeRtpSession *s)
 {
   (void)element;
+  if (s->settings.rtx && pt == s->rtx.payload_type)
+    return gst_caps_new_simple ("application/x-rtp", "payload", G_TYPE_INT, (gint)pt, "clock-rate",
+                                G_TYPE_INT, (gint)s->settings.clock_rate, "encoding-name",
+                                G_TYPE_STRING, "RTX", "apt", G_TYPE_INT,
+                                (gint)s->settings.payload_type, NULL);
   if (pt != s->settings.payload_type)
     return NULL;
   return gst_caps_ref (s->rtp_caps);
+}
+/* rtpbin normally adds the SSRC at its per-source demux boundary. This
+ * owner has one explicitly declared peer stream, so bind that same metadata
+ * before the jitter event reaches rtprtxreceive and rtpsession. */
+static GstPadProbeReturn
+bind_feedback_source (GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+  (void)pad;
+  GstRuntimeRtpSession *s = user_data;
+  GstEvent *event = GST_PAD_PROBE_INFO_EVENT (info);
+  if (GST_EVENT_TYPE (event) == GST_EVENT_CUSTOM_UPSTREAM
+      && gst_structure_has_name (gst_event_get_structure (event), "GstRTPRetransmissionRequest"))
+    {
+      event = gst_event_make_writable (event);
+      GST_PAD_PROBE_INFO_DATA (info) = event;
+      gst_structure_set (gst_event_writable_structure (event), "ssrc", G_TYPE_UINT,
+                         s->rtx.peer_ssrc, NULL);
+    }
+  return GST_PAD_PROBE_OK;
 }
 static gboolean
 link_input (GstRuntimeRtpSession *s, int port, const gchar *name)
 {
   GstPad *input = gst_element_request_pad_simple (s->rtp, name);
-  GstPad *output
-      = gst_element_get_static_pad (port == 0 && s->encoder ? s->encoder : s->source[port], "src");
+  GstPad *output = gst_element_get_static_pad (
+      port == 0 && s->rtx_send ? s->rtx_send
+                               : (port == 0 && s->encoder ? s->encoder : s->source[port]),
+      "src");
   gboolean ok = input && output && gst_pad_link (output, input) == GST_PAD_LINK_OK;
   if (input)
     gst_object_unref (input);
@@ -44,7 +72,10 @@ link_output (GstRuntimeRtpSession *s, int port, const gchar *name, gboolean requ
   GstPad *output = request ? gst_element_request_pad_simple (s->rtp, name)
                            : gst_element_get_static_pad (s->rtp, name);
   GstPad *input = gst_element_get_static_pad (
-      port == 1 && s->jitter ? s->jitter : (port == 1 && s->decoder ? s->decoder : s->sink[port]),
+      port == 1 && s->rtx_receive
+          ? s->rtx_receive
+          : (port == 1 && s->jitter ? s->jitter
+                                    : (port == 1 && s->decoder ? s->decoder : s->sink[port])),
       "sink");
   gboolean ok = output && input && gst_pad_link (output, input) == GST_PAD_LINK_OK;
   if (input)
@@ -59,9 +90,26 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
   if (!settings || settings->payload_type > 127 || !settings->clock_rate
       || settings->clock_rate > G_MAXINT || settings->bandwidth_bps < 0)
     return NULL;
+  if (settings->feedback > 7 || (settings->feedback && !settings->reports))
+    return NULL;
+  if (settings->rtx
+      && (!(settings->feedback & 1) || !settings->reorder || settings->rtx->payload_type > 127
+          || settings->rtx->payload_type == settings->payload_type
+          || settings->rtx->ssrc == settings->ssrc || settings->rtx->peer_ssrc == settings->ssrc
+          || settings->rtx->peer_rtx_ssrc == settings->ssrc
+          || settings->rtx->peer_ssrc == settings->rtx->ssrc
+          || settings->rtx->peer_rtx_ssrc == settings->rtx->ssrc
+          || settings->rtx->peer_ssrc == settings->rtx->peer_rtx_ssrc
+          || !settings->rtx->cache_packets || settings->rtx->cache_packets > G_MAXINT16))
+    return NULL;
   GstRuntimeRtpSession *s = g_new0 (GstRuntimeRtpSession, 1);
   s->settings = *settings;
   s->settings.payload = NULL;
+  if (settings->rtx)
+    {
+      s->rtx = *settings->rtx;
+      s->settings.rtx = &s->rtx;
+    }
   GstCaps *send_caps = NULL;
   GstRuntimePayloadSettings codec = { 0 };
   s->encoded = settings->payload && settings->payload->format != GST_RUNTIME_PAYLOAD_RAW;
@@ -78,7 +126,7 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
     goto failed;
   g_object_set (s->engine, "internal-ssrc", settings->ssrc, "probation", settings->probation,
                 "rtcp-min-interval", settings->rtcp_min_interval, "rtp-profile",
-                settings->feedback_profile ? GST_RTP_PROFILE_AVPF : GST_RTP_PROFILE_AVP,
+                settings->feedback ? GST_RTP_PROFILE_AVPF : GST_RTP_PROFILE_AVP,
                 "update-ntp64-header-ext", FALSE, "bandwidth", settings->bandwidth_bps, NULL);
   if (s->encoded)
     {
@@ -106,6 +154,40 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
     s->rtp_caps = gst_caps_new_simple ("application/x-rtp", "payload", G_TYPE_INT,
                                        (gint)settings->payload_type, "clock-rate", G_TYPE_INT,
                                        (gint)settings->clock_rate, NULL);
+  if (settings->feedback & 1)
+    gst_caps_set_simple (s->rtp_caps, "rtcp-fb-nack", G_TYPE_BOOLEAN, TRUE, NULL);
+  if (settings->feedback & 2)
+    gst_caps_set_simple (s->rtp_caps, "rtcp-fb-nack-pli", G_TYPE_BOOLEAN, TRUE, NULL);
+  if (settings->feedback & 4)
+    gst_caps_set_simple (s->rtp_caps, "rtcp-fb-ccm-fir", G_TYPE_BOOLEAN, TRUE, NULL);
+  if (settings->rtx)
+    {
+      s->rtx_send = gst_element_factory_make ("rtprtxsend", NULL);
+      s->rtx_receive = gst_element_factory_make ("rtprtxreceive", NULL);
+      if (!s->rtx_send || !s->rtx_receive)
+        goto failed;
+      gst_bin_add_many (GST_BIN (s->pipeline), s->rtx_send, s->rtx_receive, NULL);
+      gchar primary[12], sender[12], receiver[12];
+      g_snprintf (primary, sizeof (primary), "%u", settings->payload_type);
+      g_snprintf (sender, sizeof (sender), "%u", settings->ssrc);
+      g_snprintf (receiver, sizeof (receiver), "%u", s->rtx.peer_ssrc);
+      GstStructure *pt = gst_structure_new ("application/x-rtp-pt-map", primary, G_TYPE_UINT,
+                                            s->rtx.payload_type, NULL);
+      GstStructure *tx = gst_structure_new ("application/x-rtp-ssrc-map", sender, G_TYPE_UINT,
+                                            s->rtx.ssrc, NULL);
+      GstStructure *rx = gst_structure_new ("application/x-rtp-ssrc-map", receiver, G_TYPE_UINT,
+                                            s->rtx.peer_rtx_ssrc, NULL);
+      GstStructure *clocks = gst_structure_new ("application/x-rtp-clock-rate-map", primary,
+                                                G_TYPE_UINT, settings->clock_rate, NULL);
+      g_object_set (s->rtx_send, "payload-type-map", pt, "ssrc-map", tx, "clock-rate-map", clocks,
+                    "max-size-packets", s->rtx.cache_packets, "max-size-time", s->rtx.cache_time_ms,
+                    NULL);
+      g_object_set (s->rtx_receive, "payload-type-map", pt, "ssrc-map", rx, NULL);
+      gst_structure_free (pt);
+      gst_structure_free (tx);
+      gst_structure_free (rx);
+      gst_structure_free (clocks);
+    }
   if (settings->reorder)
     {
       s->jitter = gst_element_factory_make ("rtpjitterbuffer", NULL);
@@ -113,8 +195,14 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
         goto failed;
       gst_bin_add (GST_BIN (s->pipeline), s->jitter);
       g_object_set (s->jitter, "latency", settings->latency_ms, "do-lost", TRUE,
-                    "do-retransmission", FALSE, NULL);
+                    "do-retransmission", s->settings.rtx != NULL, NULL);
       g_signal_connect (s->jitter, "request-pt-map", G_CALLBACK (pt_map), s);
+      if (settings->rtx)
+        {
+          GstPad *pad = gst_element_get_static_pad (s->jitter, "sink");
+          gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_EVENT_UPSTREAM, bind_feedback_source, s, NULL);
+          gst_object_unref (pad);
+        }
     }
   g_signal_connect (s->rtp, "request-pt-map", G_CALLBACK (pt_map), s);
   for (int i = 0; i < 3; i++)
@@ -150,6 +238,12 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
           || !gst_element_link (s->decoder, s->sink[1]))
         goto failed;
     }
+  if (s->rtx_send && !gst_element_link (s->encoder ? s->encoder : s->source[0], s->rtx_send))
+    goto failed;
+  if (s->rtx_receive
+      && !gst_element_link (s->rtx_receive,
+                            s->jitter ? s->jitter : (s->decoder ? s->decoder : s->sink[1])))
+    goto failed;
   if (s->jitter && !gst_element_link (s->jitter, s->decoder ? s->decoder : s->sink[1]))
     goto failed;
   if (!link_input (s, 0, "send_rtp_sink") || !link_input (s, 1, "recv_rtp_sink")
@@ -197,8 +291,12 @@ gst_runtime_rtp_session_try_write (GstRuntimeRtpSession *s, int port, const guin
       valid = gst_rtp_buffer_map (buffer, GST_MAP_READ, &rtp);
       if (valid)
         {
-          valid = gst_rtp_buffer_get_payload_type (&rtp) == s->settings.payload_type
-                  && (port != 0 || gst_rtp_buffer_get_ssrc (&rtp) == s->settings.ssrc);
+          guint pt = gst_rtp_buffer_get_payload_type (&rtp);
+          guint32 ssrc = gst_rtp_buffer_get_ssrc (&rtp);
+          valid = pt == s->settings.payload_type && (port != 0 || ssrc == s->settings.ssrc);
+          if (port == 1 && s->settings.rtx)
+            valid = (pt == s->settings.payload_type && ssrc == s->rtx.peer_ssrc)
+                    || (pt == s->rtx.payload_type && ssrc == s->rtx.peer_rtx_ssrc);
           gst_rtp_buffer_unmap (&rtp);
         }
     }
@@ -307,6 +405,19 @@ gst_runtime_rtp_session_report (GstRuntimeRtpSession *s, guint64 max_delay)
     g_signal_emit_by_name (s->engine, "send-rtcp-full", max_delay, &scheduled);
   return scheduled;
 }
+int
+gst_runtime_rtp_session_feedback (GstRuntimeRtpSession *s, guint32 kind, guint32 ssrc,
+                                  guint16 sequence, guint64 max_delay)
+{
+  if (!s || g_atomic_int_get (&s->stopped) || !s->settings.reports
+      || (kind != 1 && kind != 2 && kind != 4) || !(s->settings.feedback & kind)
+      || (kind != 1 && (sequence || max_delay)) || max_delay == GST_CLOCK_TIME_NONE
+      || (s->settings.rtx && ssrc != s->rtx.peer_ssrc))
+    return GST_FLOW_ERROR;
+  if (kind == 1)
+    return rtp_session_request_nack ((RTPSession *)s->engine, ssrc, sequence, max_delay);
+  return rtp_session_request_key_unit ((RTPSession *)s->engine, ssrc, kind == 4, -1);
+}
 gchar *
 gst_runtime_rtp_session_stats (GstRuntimeRtpSession *s)
 {
@@ -316,6 +427,14 @@ gst_runtime_rtp_session_stats (GstRuntimeRtpSession *s)
   g_object_get (s->rtp, "stats", &stats, NULL);
   if (!stats)
     return NULL;
+  if (s->rtx_send)
+    {
+      guint requests, sent, received;
+      g_object_get (s->rtx_send, "num-rtx-requests", &requests, "num-rtx-packets", &sent, NULL);
+      g_object_get (s->rtx_receive, "num-rtx-packets", &received, NULL);
+      gst_structure_set (stats, "rtx-requests", G_TYPE_UINT, requests, "rtx-sent", G_TYPE_UINT,
+                         sent, "rtx-received", G_TYPE_UINT, received, NULL);
+    }
   gchar *text = gst_structure_to_string (stats);
   gst_structure_free (stats);
   return text;
@@ -329,7 +448,11 @@ void
 gst_runtime_rtp_session_stop (GstRuntimeRtpSession *s)
 {
   if (s && g_atomic_int_compare_and_exchange (&s->stopped, FALSE, TRUE) && s->pipeline)
-    gst_element_set_state (s->pipeline, GST_STATE_NULL);
+    {
+      if (s->rtx_send)
+        gst_element_send_event (s->rtx_send, gst_event_new_flush_start ());
+      gst_element_set_state (s->pipeline, GST_STATE_NULL);
+    }
 }
 void
 gst_runtime_rtp_session_free (GstRuntimeRtpSession *s)
@@ -346,6 +469,10 @@ gst_runtime_rtp_session_free (GstRuntimeRtpSession *s)
     }
   if (s->rtp && !GST_OBJECT_PARENT (s->rtp))
     gst_object_unref (s->rtp);
+  if (s->rtx_send && !GST_OBJECT_PARENT (s->rtx_send))
+    gst_object_unref (s->rtx_send);
+  if (s->rtx_receive && !GST_OBJECT_PARENT (s->rtx_receive))
+    gst_object_unref (s->rtx_receive);
   if (s->encoder && !GST_OBJECT_PARENT (s->encoder))
     gst_object_unref (s->encoder);
   if (s->decoder && !GST_OBJECT_PARENT (s->decoder))
