@@ -519,6 +519,7 @@ if building_full
     init_static_plugins_c,
     'runtime/gstruntimepayload.c',
     'runtime/gstruntimeapi.c',
+    'runtime/gstruntimepayloadapi.c',
     c_args: ['-DBUILDING_GST'] + gst_c_args,
     target_type: get_option('gst-full-target-type'),
     link_args: gstfull_link_args,

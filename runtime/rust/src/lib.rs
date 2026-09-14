@@ -1,6 +1,7 @@
 //! Ownership adapters for the pinned private media library. Wire parsing,
 //! protocol transitions and media engines remain in the native library.
 mod ffi;
+pub mod payload;
 pub mod rtsp;
 use std::sync::Once;
 static INITIALIZE: Once = Once::new();
