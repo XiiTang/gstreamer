@@ -104,6 +104,7 @@ main (int argc, char **argv)
   gst_runtime_rtp_session_free (b);
   settings.ssrc = 7;
   settings.reports = FALSE;
+  settings.feedback = 0;
   a = gst_runtime_rtp_session_new (&settings);
   g_assert_nonnull (a);
   g_assert_false (gst_runtime_rtp_session_report (a, GST_SECOND));

@@ -6,9 +6,16 @@ G_BEGIN_DECLS
 typedef struct _GstRuntimeRtpSession GstRuntimeRtpSession;
 typedef struct
 {
+  guint32 payload_type, ssrc, peer_ssrc, peer_rtx_ssrc;
+  guint32 cache_packets, cache_time_ms;
+} GstRuntimeRtxSettings;
+typedef struct
+{
   guint32 ssrc, payload_type, clock_rate, probation;
   guint64 rtcp_min_interval;
-  gboolean reports, feedback_profile;
+  gboolean reports;
+  guint32 feedback; /* bit 0 NACK, bit 1 PLI, bit 2 FIR */
+  const GstRuntimeRtxSettings *rtx;
   const GstRuntimePayloadSettings *payload;
   gboolean reorder;
   guint32 latency_ms;
@@ -40,6 +47,11 @@ int gst_runtime_rtp_session_read (GstRuntimeRtpSession *session, int port, guint
 /* Native RTCP scheduling result; permitted only when reports were declared. */
 GST_API
 gboolean gst_runtime_rtp_session_report (GstRuntimeRtpSession *session, guint64 max_delay);
+/* 1 scheduled, 0 native source/timing declined, negative invalid declaration.
+ * kind is one of 1 NACK, 2 PLI, 4 FIR; sequence/delay only apply to NACK. */
+GST_API
+int gst_runtime_rtp_session_feedback (GstRuntimeRtpSession *, guint32 kind, guint32 ssrc,
+                                      guint16 sequence, guint64 max_delay);
 GST_API
 gchar *gst_runtime_rtp_session_stats (GstRuntimeRtpSession *session);
 GST_API

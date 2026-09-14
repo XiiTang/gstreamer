@@ -15,10 +15,41 @@ pub struct Configuration<'a> {
     pub clock_rate: u32,
     pub probation: u32,
     pub reports: Option<Duration>,
-    pub feedback_profile: bool,
+    pub feedback: Option<&'a Feedback>,
     pub bandwidth_bps: Option<u64>,
     pub payload: Option<&'a crate::payload::Configuration<'a>>,
     pub reorder_latency: Option<Duration>,
+}
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct Rtx {
+    pub payload_type: u32,
+    pub ssrc: u32,
+    pub peer_ssrc: u32,
+    pub peer_rtx_ssrc: u32,
+    pub cache_packets: u32,
+    pub cache_time_ms: u32,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct Feedback {
+    pub nack: bool,
+    pub pli: bool,
+    pub fir: bool,
+    pub rtx: Option<Rtx>,
+}
+#[derive(Clone, Copy, Debug)]
+pub enum FeedbackRequest {
+    Nack {
+        ssrc: u32,
+        sequence: u16,
+        max_delay: Duration,
+    },
+    PictureLoss {
+        ssrc: u32,
+    },
+    FullIntraRequest {
+        ssrc: u32,
+    },
 }
 #[derive(Debug, Clone, Copy)]
 #[repr(i32)]
@@ -50,7 +81,8 @@ struct Settings {
     probation: u32,
     rtcp_min_interval: u64,
     reports: i32,
-    feedback_profile: i32,
+    feedback: u32,
+    rtx: *const Rtx,
     payload: *const crate::payload::Settings,
     reorder: i32,
     latency_ms: u32,
@@ -78,6 +110,13 @@ unsafe extern "C" {
         frame: *mut *mut c_void,
     ) -> i32;
     fn gst_runtime_rtp_session_report(session: *mut c_void, delay: u64) -> i32;
+    fn gst_runtime_rtp_session_feedback(
+        session: *mut c_void,
+        kind: u32,
+        ssrc: u32,
+        sequence: u16,
+        delay: u64,
+    ) -> i32;
     fn gst_runtime_rtp_session_stats(session: *mut c_void) -> *mut c_char;
     fn gst_runtime_rtp_session_stop(session: *mut c_void);
     fn gst_runtime_rtp_session_free(session: *mut c_void);
@@ -122,7 +161,13 @@ impl Session {
                 .map_or(Ok(0), |v| u64::try_from(v.as_nanos()))
                 .map_err(|_| Error(-5))?,
             reports: i32::from(c.reports.is_some()),
-            feedback_profile: i32::from(c.feedback_profile),
+            feedback: c.feedback.map_or(0, |f| {
+                u32::from(f.nack) | (u32::from(f.pli) << 1) | (u32::from(f.fir) << 2)
+            }),
+            rtx: c
+                .feedback
+                .and_then(|f| f.rtx.as_ref())
+                .map_or(std::ptr::null(), |r| r),
             bandwidth_bps: c.bandwidth_bps.unwrap_or(0) as f64,
             payload: std::ptr::null(),
             reorder: i32::from(c.reorder_latency.is_some()),
@@ -198,6 +243,29 @@ impl Session {
         let delay = u64::try_from(max_delay.as_nanos()).map_err(|_| Error(-5))?;
         Ok(unsafe { gst_runtime_rtp_session_report(self.inner.0.as_ptr(), delay) } != 0)
     }
+    pub fn feedback(&mut self, request: FeedbackRequest) -> Result<bool, Error> {
+        let (kind, ssrc, sequence, delay) = match request {
+            FeedbackRequest::Nack {
+                ssrc,
+                sequence,
+                max_delay,
+            } => (
+                1,
+                ssrc,
+                sequence,
+                u64::try_from(max_delay.as_nanos()).map_err(|_| Error(-5))?,
+            ),
+            FeedbackRequest::PictureLoss { ssrc } => (2, ssrc, 0, 0),
+            FeedbackRequest::FullIntraRequest { ssrc } => (4, ssrc, 0, 0),
+        };
+        match unsafe {
+            gst_runtime_rtp_session_feedback(self.inner.0.as_ptr(), kind, ssrc, sequence, delay)
+        } {
+            0 => Ok(false),
+            1 => Ok(true),
+            code => Err(Error(code)),
+        }
+    }
     pub fn statistics(&mut self) -> Result<String, Error> {
         let raw = unsafe { gst_runtime_rtp_session_stats(self.inner.0.as_ptr()) };
         if raw.is_null() {
@@ -214,6 +282,88 @@ impl Session {
 mod tests {
     use super::*;
     #[test]
+    fn feedback_abi_enforces_capabilities_and_mapping() {
+        let feedback = Feedback {
+            nack: true,
+            pli: true,
+            fir: true,
+            rtx: Some(Rtx {
+                payload_type: 97,
+                ssrc: 70,
+                peer_ssrc: 8,
+                peer_rtx_ssrc: 80,
+                cache_packets: 32,
+                cache_time_ms: 1000,
+            }),
+        };
+        let config = Configuration {
+            ssrc: 7,
+            payload_type: 96,
+            clock_rate: 90000,
+            probation: 0,
+            reports: Some(Duration::from_millis(10)),
+            feedback: Some(&feedback),
+            bandwidth_bps: Some(128000),
+            payload: None,
+            reorder_latency: Some(Duration::from_millis(200)),
+        };
+        let mut session = Session::new(config).unwrap();
+        assert!(
+            !session
+                .feedback(FeedbackRequest::PictureLoss { ssrc: 8 })
+                .unwrap()
+        );
+        assert!(
+            session
+                .feedback(FeedbackRequest::PictureLoss { ssrc: 9 })
+                .is_err()
+        );
+        assert!(
+            session
+                .feedback(FeedbackRequest::Nack {
+                    ssrc: 8,
+                    sequence: 1,
+                    max_delay: Duration::MAX
+                })
+                .is_err()
+        );
+        assert!(session.statistics().unwrap().contains("rtx-sent"));
+        assert!(
+            Session::new(Configuration {
+                reports: None,
+                ..config
+            })
+            .is_err()
+        );
+        assert!(
+            Session::new(Configuration {
+                reorder_latency: None,
+                ..config
+            })
+            .is_err()
+        );
+        let bad = Feedback {
+            rtx: Some(Rtx {
+                peer_ssrc: 7,
+                ..feedback.rtx.unwrap()
+            }),
+            ..feedback
+        };
+        assert!(
+            Session::new(Configuration {
+                feedback: Some(&bad),
+                ..config
+            })
+            .is_err()
+        );
+        session.cancellation().cancel();
+        assert!(
+            session
+                .feedback(FeedbackRequest::PictureLoss { ssrc: 8 })
+                .is_err()
+        );
+    }
+    #[test]
     fn nonblocking_ports_preserve_packets_and_cancel_full_queues() {
         let mut s = Session::new(Configuration {
             ssrc: 7,
@@ -221,7 +371,7 @@ mod tests {
             clock_rate: 90000,
             probation: 0,
             reports: None,
-            feedback_profile: false,
+            feedback: None,
             bandwidth_bps: None,
             payload: None,
             reorder_latency: None,

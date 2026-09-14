@@ -5294,6 +5294,11 @@ rtp_session_request_nack (RTPSession * sess, guint32 ssrc, guint16 seqnum,
   if (source == NULL)
     goto no_source;
 
+  if (max_delay >= GST_CLOCK_TIME_NONE - now) {
+    RTP_SESSION_UNLOCK (sess);
+    return FALSE;
+  }
+
   GST_DEBUG ("request NACK for SSRC %08x, #%u, deadline %" GST_TIME_FORMAT,
       ssrc, seqnum, GST_TIME_ARGS (now + max_delay));
   rtp_source_register_nack (source, seqnum, now + max_delay);
