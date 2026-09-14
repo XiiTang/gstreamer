@@ -124,6 +124,41 @@ impl Rtsp {
             _exclusive: PhantomData,
         })
     }
+    #[cfg(windows)]
+    pub fn from_socket(
+        stream: std::os::windows::io::OwnedSocket,
+        uri: &str,
+        version: Version,
+        body_limit: u32,
+    ) -> Result<Self, Error> {
+        use std::os::windows::io::AsRawSocket;
+        initialize();
+        let uri = text(uri)?;
+        let fd = i32::try_from(stream.as_raw_socket()).map_err(|_| Error::INVALID)?;
+        let mut output = std::ptr::null_mut();
+        let mut taken = 0;
+        let result = unsafe {
+            ffi::gst_runtime_rtsp_new(
+                uri.as_ptr(),
+                fd,
+                match version {
+                    Version::V1 => 1,
+                    Version::V2 => 2,
+                },
+                body_limit,
+                &mut output,
+                &mut taken,
+            )
+        };
+        if taken != 0 {
+            std::mem::forget(stream);
+        }
+        Error::check(result)?;
+        Ok(Self {
+            inner: Arc::new(Inner(NonNull::new(output).ok_or(Error::INVALID)?)),
+            _exclusive: PhantomData,
+        })
+    }
     pub fn cancellation(&self) -> Cancellation {
         Cancellation(self.inner.clone())
     }
