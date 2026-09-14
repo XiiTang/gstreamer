@@ -103,3 +103,16 @@ validated against every future encoded frame. `sdp_selection.c` covers acceptanc
 and rejection and `payload.c` binds all seven actual payload round trips through
 SDP, with independent FFmpeg pixel checks. RFC 7826 Appendix D and RFC 7587 define
 the inherited control/direction and Opus hint interpretation respectively.
+
+Explicit periodic RTSP maintenance is owned by the Rust native adapter on the
+same serialized client. Configure one OPTIONS or GET_PARAMETER cycle per session,
+with a positive interval, write/response deadline, URI and optional already chosen
+authentication challenge. The adapter does not derive an interval from the remote
+Session timeout. The host polls `keepalive_step` and `receive_step`, defers other
+requests while a maintenance request is outstanding, and continues reading media
+and server requests. A negative response or unavailable authentication challenge
+ends that cycle without retry/fallback. Original responses still use the ordinary
+message path. A partial-write/response timeout preserves dispatch uncertainty and
+cancels the control owner. The cancellation handle stops future cycles while an
+already dispatched request retains its deadline; this also covers an abandoned
+configuration handoff. Local timer passage never asserts remote session expiry.

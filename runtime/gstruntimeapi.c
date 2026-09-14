@@ -316,3 +316,14 @@ gst_runtime_rtsp_invalidate (GstRuntimeRtsp *client)
 {
   gst_rtsp_runtime_client_invalidate (client->client);
 }
+
+int
+gst_runtime_rtsp_request_ready (GstRuntimeRtsp *client)
+{
+  return client && gst_rtsp_runtime_client_request_ready (client->client);
+}
+int
+gst_runtime_rtsp_session_active (GstRuntimeRtsp *client, const char *session)
+{
+  return client && gst_rtsp_runtime_client_session_active (client->client, session);
+}

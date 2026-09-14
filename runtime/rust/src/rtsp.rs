@@ -1,4 +1,9 @@
+mod keepalive;
 use crate::{Error, ffi, initialize};
+pub use keepalive::{
+    Keepalive, KeepaliveAuthentication, KeepaliveCancellation, KeepaliveEvent, KeepaliveEventKind,
+    KeepaliveFailure, KeepaliveMethod, KeepaliveStatus,
+};
 use std::{
     cell::Cell,
     ffi::{CStr, CString, c_void},
@@ -83,6 +88,7 @@ pub struct Rtsp {
     inner: Arc<Inner>,
     version: Version,
     authentication: Option<crate::rtsp_auth::Auth>,
+    keepalives: keepalive::State,
     _exclusive: PhantomData<Cell<()>>,
 }
 #[derive(Clone)]
@@ -155,6 +161,7 @@ impl Rtsp {
             inner: Arc::new(Inner(NonNull::new(output).ok_or(Error::INVALID)?)),
             version,
             authentication: None,
+            keepalives: Default::default(),
             _exclusive: PhantomData,
         })
     }
@@ -192,6 +199,7 @@ impl Rtsp {
             inner: Arc::new(Inner(NonNull::new(output).ok_or(Error::INVALID)?)),
             version,
             authentication: None,
+            keepalives: Default::default(),
             _exclusive: PhantomData,
         })
     }
@@ -463,6 +471,7 @@ impl Rtsp {
         let result = self
             .authenticate_received(result.is_ok(), true, &mut message)
             .and(result);
+        self.keepalives.observe(result.is_ok(), &message);
         (result, message)
     }
     /// False means a retained partial message. No partial event is published;
@@ -481,6 +490,8 @@ impl Rtsp {
         let result = self
             .authenticate_received(result.is_ok(), matches!(result, Ok(true)), &mut message)
             .and(result);
+        self.keepalives
+            .observe(matches!(result, Ok(true)), &message);
         (result, message)
     }
     pub fn transport(&mut self, session: &str, uri: &str) -> Result<Option<Transport>, Error> {
