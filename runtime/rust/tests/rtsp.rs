@@ -94,3 +94,60 @@ fn cancellation_interrupts_partial_response_and_preserves_raw_evidence() {
     drop(cancellation);
     assert_eq!(server.read(&mut [0]).unwrap(), 0);
 }
+
+#[test]
+fn versioned_transport_view_is_owned_after_next_setup_and_close() {
+    for (version, wire, header) in [
+        (
+            Version::V1,
+            "1.0",
+            "RTP/AVP/TCP;unicast;interleaved=4-5;ssrc=01020304",
+        ),
+        (
+            Version::V2,
+            "2.0",
+            "RTP/AVP/UDP;unicast;dest_addr=\":8000\"/\":8001\";src_addr=\"[2001:db8::1]:9000\"/\"media.example:9001\";ssrc=01020304/00000000",
+        ),
+    ] {
+        let (stream, mut server) = UnixStream::pair().unwrap();
+        let mut client = Rtsp::from_stream(stream.into(), URI, version, 4096).unwrap();
+        assert!(client.transport("s", URI).unwrap().is_none());
+        client.request("SETUP", URI, &[], &[], SECOND).0.unwrap();
+        request(&mut server);
+        server
+            .write_all(
+                format!(
+                    "RTSP/{wire} 200 OK\r\nCSeq: 1\r\nSession: s\r\nTransport: {header}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        client.receive(SECOND).0.unwrap();
+        let view = client.transport("s", URI).unwrap().unwrap();
+        assert_eq!(view.profile, "AVP");
+        assert_eq!(view.ssrcs[0], 0x01020304);
+        match version {
+            Version::V1 => assert_eq!(view.interleaved, Some((4, Some(5)))),
+            Version::V2 => {
+                assert_eq!(view.source_addresses[0].host, "2001:db8::1");
+                assert_eq!(view.source_addresses[1].port, 9001);
+                assert_eq!(view.destination_addresses[0].host, "");
+                assert_eq!(view.ssrcs, [0x01020304, 0]);
+            }
+        }
+        client
+            .request("SETUP", URI, &[("Session", "s")], &[], SECOND)
+            .0
+            .unwrap();
+        request(&mut server);
+        server.write_all(format!("RTSP/{wire} 200 OK\r\nCSeq: 2\r\nSession: s\r\nTransport: RTP/AVP/TCP;unicast;interleaved=8-9\r\n\r\n").as_bytes()).unwrap();
+        client.receive(SECOND).0.unwrap();
+        assert_eq!(
+            client.transport("s", URI).unwrap().unwrap().interleaved,
+            Some((8, Some(9)))
+        );
+        drop(client);
+        assert_eq!(view.ssrcs[0], 0x01020304);
+        assert_eq!(server.read(&mut [0]).unwrap(), 0);
+    }
+}
