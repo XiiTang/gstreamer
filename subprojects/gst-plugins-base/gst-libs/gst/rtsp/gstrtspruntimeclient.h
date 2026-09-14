@@ -45,6 +45,11 @@ GST_RTSP_API
 GBytes *gst_rtsp_runtime_client_received_bytes (GstRTSPRuntimeClient *client);
 GST_RTSP_API
 GstRTSPRuntimeDispatch gst_rtsp_runtime_client_dispatch (GstRTSPRuntimeClient *client);
+/* Timings are observations only. Local elapsed time never closes a session. */
+GST_RTSP_API
+gboolean gst_rtsp_runtime_client_session_info (GstRTSPRuntimeClient *client, const gchar *session,
+                                               guint64 *timeout_seconds, gboolean *explicit_timeout,
+                                               guint64 *control_response_age_us);
 GST_RTSP_API
 gboolean gst_rtsp_runtime_client_track_state (GstRTSPRuntimeClient *client, const gchar *session,
                                               const gchar *uri, GstRTSPRuntimeState *state);

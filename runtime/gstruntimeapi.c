@@ -240,6 +240,18 @@ gst_runtime_rtsp_message_free (GstRuntimeRtspMessage *message)
   g_free (message);
 }
 int
+gst_runtime_rtsp_session_info (GstRuntimeRtsp *client, const char *session,
+                               guint64 *timeout_seconds, int *explicit_timeout,
+                               guint64 *control_response_age_us)
+{
+  gboolean explicit_value;
+  if (!gst_rtsp_runtime_client_session_info (client->client, session, timeout_seconds,
+                                             &explicit_value, control_response_age_us))
+    return 1;
+  *explicit_timeout = explicit_value;
+  return 0;
+}
+int
 gst_runtime_rtsp_state (GstRuntimeRtsp *client, const char *session, const char *uri)
 {
   GstRTSPRuntimeState state;
