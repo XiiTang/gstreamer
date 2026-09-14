@@ -248,6 +248,10 @@ fn cancelling_an_inflight_cycle_retains_its_response_deadline_and_unknown_outcom
                 assert_eq!(failure.error, Error::TIMEOUT);
                 assert!(failure.dispatch.may_have_been_sent);
                 assert_eq!(failure.dispatch.sequence, 2);
+                assert_eq!(
+                    native.state("s", URI).unwrap(),
+                    Some(imapipe_media::rtsp::TrackState::Unknown)
+                );
                 break;
             }
         }

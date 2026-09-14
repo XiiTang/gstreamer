@@ -600,7 +600,8 @@ gst_rtsp_runtime_client_invalidate (GstRTSPRuntimeClient *client)
     {
       g_hash_table_iter_init (&tracks, ((RuntimeSession *)session)->tracks);
       while (g_hash_table_iter_next (&tracks, NULL, &track))
-        ((RuntimeTrack *)track)->state = GST_RTSP_RUNTIME_UNKNOWN;
+        if (((RuntimeTrack *)track)->state != GST_RTSP_RUNTIME_CLOSED)
+          ((RuntimeTrack *)track)->state = GST_RTSP_RUNTIME_UNKNOWN;
     }
   gst_rtsp_connection_flush (client->connection, TRUE);
 }

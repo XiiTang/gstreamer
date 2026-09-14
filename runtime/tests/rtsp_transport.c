@@ -295,6 +295,7 @@ explicit_state (GstRTSPVersion version)
   write (pair[1], wrong, strlen (wrong));
   g_free (wrong);
   g_assert_cmpint (gst_rtsp_runtime_client_receive (client, &reply, 1000000), ==, GST_RTSP_EPARSE);
+  gst_rtsp_runtime_client_invalidate (client);
   state_is (client, two, GST_RTSP_RUNTIME_UNKNOWN);
   state_is (client, one, GST_RTSP_RUNTIME_CLOSED);
   g_assert_cmpint (gst_rtsp_runtime_client_request (client, &request, 1000000), ==,
