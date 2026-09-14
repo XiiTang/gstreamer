@@ -27,13 +27,13 @@ impl Drop for Peer {
         self.thread.take().unwrap().join().unwrap();
     }
 }
-fn receive(native: &mut Rtsp) {
+fn receive(native: &mut Rtsp) -> imapipe_media::rtsp::Message {
     let end = Instant::now() + Duration::from_secs(2);
     loop {
         let (result, message) = native.receive_step();
         if result.unwrap() {
             assert_eq!(message.kind, 2);
-            return;
+            return message;
         }
         assert!(Instant::now() < end);
         thread::sleep(Duration::from_millis(1));
@@ -365,16 +365,39 @@ fn declared_digest_cycle_follows_only_verified_nonce_continuation() {
             let mut options = configuration(KeepaliveMethod::GetParameter);
             options.authentication = Some(KeepaliveAuthentication { challenge, qop });
             native.configure_keepalive("s", Some(options)).unwrap();
-            for (sequence, nonce) in [(3, "nonce-one"), (4, "nonce-two"), (5, "nonce-two")] {
-                let deadline = Instant::now() + Duration::from_secs(1);
-                loop {
-                    if let Some(event) = native.keepalive_step().unwrap() {
-                        if matches!(event.kind, KeepaliveEventKind::Sent) {
-                            break;
+            let mut selected = String::new();
+            for (sequence, nonce) in [
+                (3, "nonce-one"),
+                (4, "nonce-two"),
+                (5, "nonce-three"),
+                (6, "nonce-three"),
+            ] {
+                if sequence == 4 {
+                    assert!(
+                        native
+                            .request_authenticated_begin(
+                                "GET_PARAMETER",
+                                URI,
+                                &[("Session", "s")],
+                                &[],
+                                &selected,
+                                qop
+                            )
+                            .0
+                            .unwrap()
+                    );
+                    assert!(native.write_step().0.unwrap());
+                } else {
+                    let deadline = Instant::now() + Duration::from_secs(1);
+                    loop {
+                        if let Some(event) = native.keepalive_step().unwrap() {
+                            if matches!(event.kind, KeepaliveEventKind::Sent) {
+                                break;
+                            }
                         }
+                        assert!(Instant::now() < deadline);
+                        thread::sleep(Duration::from_millis(1));
                     }
-                    assert!(Instant::now() < deadline);
-                    thread::sleep(Duration::from_millis(1));
                 }
                 let sent = request(&mut server);
                 assert!(sent.starts_with("GET_PARAMETER "));
@@ -393,7 +416,7 @@ fn declared_digest_cycle_follows_only_verified_nonce_continuation() {
                 assert_eq!(fields["qop"], qop_wire);
                 assert_eq!(
                     fields["nc"],
-                    if sequence == 5 {
+                    if sequence == 6 {
                         "00000002"
                     } else {
                         "00000001"
@@ -420,18 +443,21 @@ fn declared_digest_cycle_follows_only_verified_nonce_continuation() {
                     fields["response"],
                     digest(&format!("GET_PARAMETER:{URI}{body_hash}"))
                 );
-                if sequence == 5 {
+                if sequence == 6 {
                     // A fresh challenge is visible, but never silently selected by maintenance.
-                    server.write_all(format!("RTSP/{wire} 401 Unauthorized\r\nCSeq: {sequence}\r\nWWW-Authenticate: Digest realm=\"camera\",nonce=\"nonce-three\",algorithm=SHA-256,qop=\"{qop_wire}\"\r\n\r\n").as_bytes()).unwrap();
+                    server.write_all(format!("RTSP/{wire} 401 Unauthorized\r\nCSeq: {sequence}\r\nWWW-Authenticate: Digest realm=\"camera\",nonce=\"nonce-four\",algorithm=SHA-256,qop=\"{qop_wire}\"\r\n\r\n").as_bytes()).unwrap();
                 } else {
-                    let next = if sequence == 3 {
-                        ", nextnonce=\"nonce-two\""
-                    } else {
-                        ""
+                    let next = match sequence {
+                        3 => ", nextnonce=\"nonce-two\"",
+                        4 => ", nextnonce=\"nonce-three\"",
+                        _ => "",
                     };
                     server.write_all(format!("RTSP/{wire} 200 OK\r\nCSeq: {sequence}\r\nAuthentication-Info: rspauth=\"{}\", qop={qop_wire}, cnonce=\"{}\", nc={}{next}\r\n\r\n",digest(&format!(":{URI}{body_hash}")),fields["cnonce"],fields["nc"]).as_bytes()).unwrap();
                 }
-                receive(&mut native);
+                let reply = receive(&mut native);
+                if let Some(challenge) = reply.authentication.and_then(|mut a| a.challenges.pop()) {
+                    selected = challenge.id;
+                }
             }
             assert!(!native.keepalive_status("s").unwrap().enabled);
             pump(&mut native, Duration::from_millis(30)).unwrap();

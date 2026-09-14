@@ -121,3 +121,5 @@ continuation within that same context, preserving qop and frozen identity. A new
 401 challenge still stops the cycle and requires an explicit selection. Native
 tests independently verify SHA-256 request and response proofs, nonce-count reset
 and subsequent increment for both RTSP versions and auth/auth-int.
+Verified nonce changes from ordinary explicit requests also advance declared
+cycles selecting that same context; unrelated challenge selections are untouched.
