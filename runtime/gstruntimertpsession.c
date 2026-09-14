@@ -202,6 +202,11 @@ gst_runtime_rtp_session_stats (GstRuntimeRtpSession *s)
   return text;
 }
 void
+gst_runtime_rtp_session_stats_free (gchar *stats)
+{
+  g_free (stats);
+}
+void
 gst_runtime_rtp_session_stop (GstRuntimeRtpSession *s)
 {
   if (s && g_atomic_int_compare_and_exchange (&s->stopped, FALSE, TRUE) && s->pipeline)

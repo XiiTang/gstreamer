@@ -32,6 +32,8 @@ gboolean gst_runtime_rtp_session_report (GstRuntimeRtpSession *session, guint64 
 GST_API
 gchar *gst_runtime_rtp_session_stats (GstRuntimeRtpSession *session);
 GST_API
+void gst_runtime_rtp_session_stats_free (gchar *stats);
+GST_API
 void gst_runtime_rtp_session_stop (GstRuntimeRtpSession *session);
 GST_API
 void gst_runtime_rtp_session_free (GstRuntimeRtpSession *session);
