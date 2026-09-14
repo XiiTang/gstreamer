@@ -3401,18 +3401,28 @@ gst_rtsp_connection_poll_usec (GstRTSPConnection * conn, GstRTSPEvent events,
   g_return_val_if_fail (conn->read_socket != NULL, GST_RTSP_EINVAL);
   g_return_val_if_fail (conn->write_socket != NULL, GST_RTSP_EINVAL);
 
-  if (conn->runtime_io && events == GST_RTSP_EV_READ) {
+  if (conn->runtime_io && conn->read_socket == conn->write_socket) {
     GError *error = NULL;
+    GIOCondition requested = G_IO_HUP | G_IO_ERR;
+    if (events & GST_RTSP_EV_READ)
+      requested |= G_IO_IN;
+    if (events & GST_RTSP_EV_WRITE)
+      requested |= G_IO_OUT;
     cancellable = get_cancellable (conn);
     gboolean ready = g_socket_condition_timed_wait (conn->read_socket,
-        G_IO_IN | G_IO_HUP | G_IO_ERR, timeout ? timeout : -1, cancellable, &error);
+        requested, timeout ? timeout : -1, cancellable, &error);
     g_clear_object (&cancellable);
-    *revents = ready ? GST_RTSP_EV_READ : 0;
+    *revents = 0;
     if (!ready) {
       GstRTSPResult result = gst_rtsp_result_from_g_io_error (error, GST_RTSP_ESYS);
       g_clear_error (&error);
       return result;
     }
+    condition = g_socket_condition_check (conn->read_socket, requested);
+    if ((events & GST_RTSP_EV_READ) && (condition & (G_IO_IN | G_IO_HUP | G_IO_ERR)))
+      *revents |= GST_RTSP_EV_READ;
+    if ((events & GST_RTSP_EV_WRITE) && (condition & (G_IO_OUT | G_IO_HUP | G_IO_ERR)))
+      *revents |= GST_RTSP_EV_WRITE;
     return GST_RTSP_OK;
   }
 
