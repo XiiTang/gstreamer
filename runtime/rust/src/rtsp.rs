@@ -184,6 +184,104 @@ impl Rtsp {
     pub fn cancellation(&self) -> Cancellation {
         Cancellation(self.inner.clone())
     }
+    /// False means the single native writer is occupied; no admission occurred.
+    pub fn request_begin(
+        &mut self,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> (Result<bool, Error>, Dispatch) {
+        let mut dispatch = Dispatch::default();
+        let result = (|| {
+            let method = text(method)?;
+            let uri = text(uri)?;
+            let headers = Headers::new(headers)?;
+            let mut stage = 0;
+            let code = unsafe {
+                ffi::gst_runtime_rtsp_request_begin(
+                    self.inner.0.as_ptr(),
+                    method.as_ptr(),
+                    uri.as_ptr(),
+                    headers.values.as_ptr(),
+                    headers.values.len(),
+                    body.as_ptr(),
+                    body.len(),
+                    &mut dispatch.sequence,
+                    &mut stage,
+                )
+            };
+            dispatch.may_have_been_sent = stage != 0;
+            if code == 1 {
+                Ok(false)
+            } else {
+                Error::check(code).map(|_| true)
+            }
+        })();
+        (result, dispatch)
+    }
+    pub fn respond_begin(
+        &mut self,
+        status: u16,
+        reason: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<bool, Error> {
+        let reason = text(reason)?;
+        let headers = Headers::new(headers)?;
+        let code = unsafe {
+            ffi::gst_runtime_rtsp_respond_begin(
+                self.inner.0.as_ptr(),
+                status.into(),
+                reason.as_ptr(),
+                headers.values.as_ptr(),
+                headers.values.len(),
+                body.as_ptr(),
+                body.len(),
+            )
+        };
+        if code == 1 {
+            Ok(false)
+        } else {
+            Error::check(code).map(|_| true)
+        }
+    }
+    /// True means the owned write completed. Partial wire progress is never replayed.
+    pub fn write_step(&mut self) -> (Result<bool, Error>, Dispatch) {
+        let mut dispatch = Dispatch::default();
+        let mut stage = 0;
+        let code = unsafe {
+            ffi::gst_runtime_rtsp_write_step(
+                self.inner.0.as_ptr(),
+                &mut dispatch.sequence,
+                &mut stage,
+            )
+        };
+        dispatch.may_have_been_sent = stage != 0;
+        (
+            if code == 1 {
+                Ok(false)
+            } else {
+                Error::check(code).map(|_| true)
+            },
+            dispatch,
+        )
+    }
+    pub fn send_data_begin(&mut self, channel: u8, bytes: &[u8]) -> Result<bool, Error> {
+        let code = unsafe {
+            ffi::gst_runtime_rtsp_send_data_begin(
+                self.inner.0.as_ptr(),
+                channel,
+                bytes.as_ptr(),
+                bytes.len(),
+            )
+        };
+        if code == 1 {
+            Ok(false)
+        } else {
+            Error::check(code).map(|_| true)
+        }
+    }
     pub fn request(
         &mut self,
         method: &str,

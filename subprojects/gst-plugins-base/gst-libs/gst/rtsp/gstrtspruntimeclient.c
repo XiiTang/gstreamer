@@ -26,7 +26,7 @@ struct _GstRTSPRuntimeClient
   GstRTSPVersion version;
   gchar *root;
   GHashTable *sessions;
-  gboolean pending, unknown;
+  gboolean pending, unknown, writing_request;
   guint32 cseq;
   GstRTSPMethod method;
   gchar *uri, *session;
@@ -127,10 +127,12 @@ gst_rtsp_runtime_client_new (const GstRTSPUrl *url, GSocket *socket, GstRTSPVers
   *output = client;
   return GST_RTSP_OK;
 }
-GstRTSPResult
-gst_rtsp_runtime_client_request (GstRTSPRuntimeClient *client, GstRTSPMessage *request,
-                                 gint64 timeout)
+static int
+request_mode (GstRTSPRuntimeClient *client, GstRTSPMessage *request, gint64 timeout,
+              gboolean incremental)
 {
+  if (client && gst_rtsp_connection_write_pending (client->connection))
+    return incremental ? 1 : GST_RTSP_EINVAL;
   g_return_val_if_fail (client && request, GST_RTSP_EINVAL);
   if (client->pending || client->unknown || !gst_rtsp_message_is_safe_to_serialize (request)
       || request->type != GST_RTSP_MESSAGE_REQUEST
@@ -201,8 +203,11 @@ gst_rtsp_runtime_client_request (GstRTSPRuntimeClient *client, GstRTSPMessage *r
   client->cseq = sequence;
   client->pending = TRUE;
   client->dispatch = GST_RTSP_RUNTIME_NOT_SENT;
-  GstRTSPResult result = gst_rtsp_connection_send_usec (client->connection, request, timeout);
-  if (result == GST_RTSP_OK || gst_rtsp_connection_written_bytes (client->connection) > 0)
+  int result = incremental ? gst_rtsp_connection_write_begin (client->connection, request)
+                           : gst_rtsp_connection_send_usec (client->connection, request, timeout);
+  client->writing_request = incremental && result == GST_RTSP_OK;
+  if (!incremental
+      && (result == GST_RTSP_OK || gst_rtsp_connection_written_bytes (client->connection) > 0))
     client->dispatch = GST_RTSP_RUNTIME_MAYBE_SENT;
   if (result != GST_RTSP_OK)
     {
@@ -211,6 +216,79 @@ gst_rtsp_runtime_client_request (GstRTSPRuntimeClient *client, GstRTSPMessage *r
       else
         unknown (client, result);
     }
+  return result;
+}
+GstRTSPResult
+gst_rtsp_runtime_client_request (GstRTSPRuntimeClient *client, GstRTSPMessage *request,
+                                 gint64 timeout)
+{
+  return request_mode (client, request, timeout, FALSE);
+}
+int
+gst_rtsp_runtime_client_request_begin (GstRTSPRuntimeClient *client, GstRTSPMessage *request)
+{
+  return request_mode (client, request, 0, TRUE);
+}
+int
+gst_rtsp_runtime_client_write_step (GstRTSPRuntimeClient *client)
+{
+  g_return_val_if_fail (client && !client->unknown, GST_RTSP_EINVAL);
+  int result = gst_rtsp_connection_write_step (client->connection);
+  if (client->writing_request && gst_rtsp_connection_written_bytes (client->connection) > 0
+      && client->dispatch == GST_RTSP_RUNTIME_NOT_SENT)
+    client->dispatch = GST_RTSP_RUNTIME_MAYBE_SENT;
+  if (result < 0)
+    return unknown (client, result);
+  if (result == 0)
+    client->writing_request = FALSE;
+  return result;
+}
+int
+gst_rtsp_runtime_client_respond_begin (GstRTSPRuntimeClient *client, GstRTSPMessage *response)
+{
+  g_return_val_if_fail (client && response, GST_RTSP_EINVAL);
+  if (client->unknown || response->type != GST_RTSP_MESSAGE_RESPONSE
+      || response->type_data.response.version != client->version)
+    return GST_RTSP_EINVAL;
+  int result = gst_rtsp_connection_write_begin (client->connection, response);
+  if (result == 0)
+    client->writing_request = FALSE;
+  return result;
+}
+int
+gst_rtsp_runtime_client_send_data_begin (GstRTSPRuntimeClient *client, guint8 channel,
+                                         const guint8 *bytes, gsize length)
+{
+  g_return_val_if_fail (client && bytes && length && length <= 65535 && !client->unknown,
+                        GST_RTSP_EINVAL);
+  if (gst_rtsp_connection_write_pending (client->connection))
+    return 1;
+  gboolean found = FALSE;
+  GHashTableIter sessions, tracks;
+  gpointer key, value, track_key, track_value;
+  g_hash_table_iter_init (&sessions, client->sessions);
+  while (g_hash_table_iter_next (&sessions, &key, &value))
+    {
+      g_hash_table_iter_init (&tracks, ((RuntimeSession *)value)->tracks);
+      while (g_hash_table_iter_next (&tracks, &track_key, &track_value))
+        {
+          RuntimeTrack *track = track_value;
+          GstRTSPRange range = track->transport->interleaved;
+          if (track->state != GST_RTSP_RUNTIME_CLOSED && track->state != GST_RTSP_RUNTIME_UNKNOWN
+              && range.min >= 0 && channel >= range.min
+              && channel <= (range.max < 0 ? range.min : range.max))
+            found = TRUE;
+        }
+    }
+  if (!found)
+    return GST_RTSP_EINVAL;
+  GstRTSPMessage message = { 0 };
+  gst_rtsp_message_init_data (&message, channel);
+  gst_rtsp_message_set_body (&message, bytes, length);
+  int result = gst_rtsp_connection_write_begin (client->connection, &message);
+  gst_rtsp_message_unset (&message);
+  if (result == 0)
+    client->writing_request = FALSE;
   return result;
 }
 static GstRTSPResult
@@ -225,6 +303,7 @@ receive_result (GstRTSPRuntimeClient *client, GstRTSPMessage *message, GstRTSPRe
                ? GST_RTSP_OK
                : unknown (client, GST_RTSP_EPARSE);
   if (message->type != GST_RTSP_MESSAGE_RESPONSE || !client->pending
+      || client->dispatch == GST_RTSP_RUNTIME_NOT_SENT
       || message->type_data.response.version != client->version)
     return unknown (client, GST_RTSP_EPARSE);
   gchar *sequence = NULL;
@@ -371,6 +450,11 @@ GBytes *
 gst_rtsp_runtime_client_received_bytes (GstRTSPRuntimeClient *client)
 {
   return gst_rtsp_connection_received_bytes (client->connection);
+}
+gsize
+gst_rtsp_runtime_client_written_bytes (GstRTSPRuntimeClient *client)
+{
+  return gst_rtsp_connection_written_bytes (client->connection);
 }
 GstRTSPRuntimeDispatch
 gst_rtsp_runtime_client_dispatch (GstRTSPRuntimeClient *client)

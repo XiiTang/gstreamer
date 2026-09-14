@@ -220,3 +220,42 @@ fn native_incremental_reader_preserves_every_fragment_and_cancel_evidence() {
     assert_eq!(result, Err(Error::CANCELLED));
     assert_eq!(message.raw, partial);
 }
+
+#[test]
+fn incremental_owned_request_and_declared_data_progress_while_read_is_partial() {
+    let (stream, mut server) = UnixStream::pair().unwrap();
+    let mut client = Rtsp::from_stream(stream.into(), URI, Version::V2, 4096).unwrap();
+    assert!(client.send_data_begin(4, b"no setup").is_err());
+    let (result, dispatch) = client.request_begin("SETUP", URI, &[], &[]);
+    assert!(result.unwrap());
+    assert!(!dispatch.may_have_been_sent);
+    assert!(!client.request_begin("OPTIONS", URI, &[], &[]).0.unwrap());
+    let (result, dispatch) = client.write_step();
+    assert!(result.unwrap());
+    assert!(dispatch.may_have_been_sent);
+    request(&mut server);
+    server.write_all(b"RTSP/2.0 200 OK\r\nCSeq: 1\r\nSession: s\r\nTransport: RTP/AVP/TCP;unicast;interleaved=4-5\r\n\r\n").unwrap();
+    assert!(client.receive_step().0.unwrap());
+    assert!(
+        client
+            .request_begin("GET_PARAMETER", URI, &[("Session", "s")], &[])
+            .0
+            .unwrap()
+    );
+    assert!(client.write_step().0.unwrap());
+    request(&mut server);
+    server
+        .write_all(b"RTSP/2.0 200 OK\r\nCSeq: 2\r\nContent-Length: 3\r\n\r\na")
+        .unwrap();
+    assert!(!client.receive_step().0.unwrap());
+    assert!(client.send_data_begin(5, &[0, 255, 1]).unwrap());
+    assert!(client.write_step().0.unwrap());
+    let mut wire = [0; 7];
+    server.read_exact(&mut wire).unwrap();
+    assert_eq!(wire, [b'$', 5, 0, 3, 0, 255, 1]);
+    server.write_all(b"bc").unwrap();
+    let (result, message) = client.receive_step();
+    assert!(result.unwrap());
+    assert_eq!(message.body, b"abc");
+    assert!(client.send_data_begin(6, b"wrong channel").is_err());
+}

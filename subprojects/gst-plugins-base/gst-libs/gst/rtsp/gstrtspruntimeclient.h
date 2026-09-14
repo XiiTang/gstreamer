@@ -64,5 +64,16 @@ GST_RTSP_API
 void gst_rtsp_runtime_client_cancel (GstRTSPRuntimeClient *client);
 GST_RTSP_API
 void gst_rtsp_runtime_client_free (GstRTSPRuntimeClient *client);
+GST_RTSP_API
+int gst_rtsp_runtime_client_request_begin (GstRTSPRuntimeClient *client, GstRTSPMessage *request);
+GST_RTSP_API
+int gst_rtsp_runtime_client_respond_begin (GstRTSPRuntimeClient *client, GstRTSPMessage *response);
+GST_RTSP_API
+int gst_rtsp_runtime_client_write_step (GstRTSPRuntimeClient *client);
+GST_RTSP_API
+int gst_rtsp_runtime_client_send_data_begin (GstRTSPRuntimeClient *client, guint8 channel,
+                                             const guint8 *bytes, gsize length);
+GST_RTSP_API
+gsize gst_rtsp_runtime_client_written_bytes (GstRTSPRuntimeClient *client);
 G_END_DECLS
 #endif
