@@ -17,6 +17,13 @@ gst_runtime_srtp_create (const srtp_runtime_options *options, const guint8 *stat
                  : srtp_runtime_create (options, out);
 }
 int
+gst_runtime_srtp_create_dtls (const srtp_runtime_options *options, srtp_runtime_context **out)
+{
+  int status = gst_srtp_initialize_library ();
+  if (status) { if (out) *out = NULL; return status; }
+  return srtp_runtime_create_dtls (options, out);
+}
+int
 gst_runtime_srtp_export (srtp_runtime_context *context, guint8 *output, gsize *length)
 {
   return srtp_runtime_export (context, output, length);
