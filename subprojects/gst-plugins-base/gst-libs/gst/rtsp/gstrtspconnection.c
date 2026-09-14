@@ -158,6 +158,11 @@ struct _GstRTSPConnection
   GstRTSPVersion version;
 
   gboolean server;
+  gboolean runtime_io;
+  GByteArray *received_bytes;
+  gsize written_bytes;
+  guint capture_limit;
+  gboolean capturing;
   GSocketClient *client;
   GIOStream *stream0;
   GIOStream *stream1;
@@ -197,7 +202,7 @@ struct _GstRTSPConnection
   gboolean remember_session_id; /* remember the session id or not */
 
   /* Session state */
-  gint cseq;                    /* sequence number */
+  gint64 cseq;                  /* sequence number; reject exhaustion before serialization */
   gchar session_id[512];        /* session id */
   gint timeout;                 /* session timeout in seconds */
   GTimer *timer;                /* timeout timer */
@@ -451,6 +456,58 @@ gst_rtsp_connection_create (const GstRTSPUrl * url, GstRTSPConnection ** conn)
   *conn = newconn;
 
   return GST_RTSP_OK;
+}
+
+GstRTSPResult
+gst_rtsp_connection_create_runtime_client (const GstRTSPUrl *url,
+    GSocket *socket, guint body_limit, GstRTSPConnection **conn)
+{
+  GstRTSPConnection *value;
+  GstRTSPResult result;
+  g_return_val_if_fail (url && G_IS_SOCKET (socket) && conn, GST_RTSP_EINVAL);
+  *conn = NULL;
+  if (body_limit > G_MAXUINT - 65536 || !g_socket_is_connected (socket) ||
+      g_socket_get_socket_type (socket) != G_SOCKET_TYPE_STREAM)
+    return GST_RTSP_EINVAL;
+  result = gst_rtsp_connection_create (url, &value);
+  if (result != GST_RTSP_OK)
+    return result;
+  value->runtime_io = TRUE;
+  value->server = FALSE;
+  value->manual_http = TRUE;
+  value->remember_session_id = FALSE;
+  value->content_length_limit = body_limit;
+  value->capture_limit = body_limit + 65536;
+  value->received_bytes = g_byte_array_new ();
+  value->stream0 = G_IO_STREAM (g_socket_connection_factory_create_connection (socket));
+  value->socket0 = socket;
+  value->read_socket = value->write_socket = socket;
+  value->input_stream = g_io_stream_get_input_stream (value->stream0);
+  value->output_stream = g_io_stream_get_output_stream (value->stream0);
+  g_mutex_init (&value->socket_use_mutex);
+  *conn = value;
+  return GST_RTSP_OK;
+}
+
+GBytes *
+gst_rtsp_connection_received_bytes (const GstRTSPConnection *conn)
+{
+  g_return_val_if_fail (conn && conn->runtime_io, NULL);
+  return g_bytes_new (conn->received_bytes->data, conn->received_bytes->len);
+}
+
+gsize
+gst_rtsp_connection_written_bytes (const GstRTSPConnection *conn)
+{
+  g_return_val_if_fail (conn && conn->runtime_io, 0);
+  return conn->written_bytes;
+}
+
+guint32
+gst_rtsp_connection_next_cseq (const GstRTSPConnection *conn)
+{
+  g_return_val_if_fail (conn && conn->runtime_io, 0);
+  return conn->cseq <= G_MAXINT32 ? (guint32) conn->cseq : 0;
 }
 
 static gboolean
@@ -1165,6 +1222,8 @@ gst_rtsp_connection_connect_with_response_usec (GstRTSPConnection * conn,
 
   g_return_val_if_fail (conn != NULL, GST_RTSP_EINVAL);
   g_return_val_if_fail (conn->url != NULL, GST_RTSP_EINVAL);
+  if (conn->runtime_io)
+    return GST_RTSP_EINVAL;
   g_return_val_if_fail (conn->stream0 == NULL, GST_RTSP_EINVAL);
 
   to = timeout * 1000;
@@ -1506,12 +1565,13 @@ writev_bytes (GOutputStream * stream, GOutputVector * vectors, gint n_vectors,
     gsize * bytes_written, gboolean block, GCancellable * cancellable)
 {
   gsize _bytes_written = 0;
-  gsize written;
+  gsize written = 0;
   GstRTSPResult ret;
   GError *err = NULL;
   GPollableReturn res = G_POLLABLE_RETURN_OK;
 
   while (n_vectors > 0) {
+    written = 0;
     if (block) {
       if (G_UNLIKELY (!g_output_stream_writev (stream, vectors, n_vectors,
                   &written, cancellable, &err))) {
@@ -1552,7 +1612,7 @@ writev_bytes (GOutputStream * stream, GOutputVector * vectors, gint n_vectors,
   /* ERRORS */
 error:
   {
-    *bytes_written = _bytes_written;
+    *bytes_written = _bytes_written + written;
 
     if (err)
       GST_WARNING ("%s", err->message);
@@ -1595,7 +1655,7 @@ fill_raw_bytes (GstRTSPConnection * conn, guint8 * buffer, guint size,
     gsize count = size - out;
     GCancellable *cancellable;
 
-    cancellable = conn->may_cancel ? get_cancellable (conn) : NULL;
+    cancellable = (conn->runtime_io || conn->may_cancel) ? get_cancellable (conn) : NULL;
 
     if (block)
       r = g_input_stream_read (conn->input_stream, (gchar *) & buffer[out],
@@ -1691,6 +1751,11 @@ read_bytes (GstRTSPConnection * conn, guint8 * buffer, guint * idx, guint size,
     if (G_UNLIKELY (r <= 0))
       goto error;
 
+    if (conn->capturing) {
+      if ((guint) r > conn->capture_limit - conn->received_bytes->len)
+        return GST_RTSP_ENOMEM;
+      g_byte_array_append (conn->received_bytes, &buffer[*idx], r);
+    }
     left -= r;
     *idx += r;
   }
@@ -1817,6 +1882,8 @@ read_line (GstRTSPConnection * conn, guint8 * buffer, guint * idx, guint size,
 
     if (G_LIKELY (*idx < size - 1))
       buffer[(*idx)++] = c;
+    else if (conn->runtime_io)
+      return GST_RTSP_EPARSE;
   }
   buffer[*idx] = '\0';
 
@@ -1949,11 +2016,13 @@ serialize_message (GstRTSPConnection * conn, GstRTSPMessage * message,
 
   switch (message->type) {
     case GST_RTSP_MESSAGE_REQUEST:
+      if (conn->cseq > G_MAXINT32)
+        return FALSE;
       str = g_string_new ("");
 
       /* create request string, add CSeq */
       g_string_append_printf (str, "%s %s RTSP/%s\r\n"
-          "CSeq: %d\r\n",
+          "CSeq: %" G_GINT64_FORMAT "\r\n",
           gst_rtsp_method_as_text (message->type_data.request.method),
           message->type_data.request.uri,
           gst_rtsp_version_as_text (message->type_data.request.version),
@@ -2127,6 +2196,12 @@ gst_rtsp_connection_send_messages_usec (GstRTSPConnection * conn,
   g_return_val_if_fail (conn != NULL, GST_RTSP_EINVAL);
   g_return_val_if_fail (messages != NULL || n_messages == 0, GST_RTSP_EINVAL);
 
+  conn->written_bytes = 0;
+  if (conn->runtime_io) {
+    for (guint n = 0; n < n_messages; n++)
+      if (!gst_rtsp_message_is_safe_to_serialize (&messages[n]))
+        return GST_RTSP_EINVAL;
+  }
   serialized_messages = g_newa (GstRTSPSerializedMessage, n_messages);
   memset (serialized_messages, 0,
       sizeof (GstRTSPSerializedMessage) * n_messages);
@@ -2245,6 +2320,7 @@ gst_rtsp_connection_send_messages_usec (GstRTSPConnection * conn,
       TRUE, cancellable);
   g_clear_object (&cancellable);
 
+  conn->written_bytes = bytes_written;
   clear_write_socket_timeout (conn);
 
   g_assert (bytes_written == bytes_to_write || res != GST_RTSP_OK);
@@ -2616,8 +2692,11 @@ cseq_validation (GstRTSPConnection * conn, GstRTSPMessage * message)
     }
 
     errno = 0;
-    cseq = g_ascii_strtoll (cseq_header, NULL, 10);
-    if (errno != 0 || cseq < 0) {
+    gchar *end;
+    cseq = g_ascii_strtoll (cseq_header, &end, 10);
+    if (errno != 0 || cseq < 0 || (conn->runtime_io &&
+        (!cseq_header[0] || *end || cseq > G_MAXINT32 ||
+         gst_rtsp_message_get_header (message, GST_RTSP_HDR_CSEQ, NULL, 1) == GST_RTSP_OK))) {
       /* CSeq has no valid value */
       goto invalid_format;
     }
@@ -2738,8 +2817,11 @@ build_next (GstRTSPBuilder * builder, GstRTSPMessage * message,
                       GST_RTSP_HDR_X_SESSIONCOOKIE, NULL, 0) != GST_RTSP_OK)) {
             /* there is, prepare to read the body */
             errno = 0;
-            content_length_parsed = g_ascii_strtoll (hdrval, NULL, 10);
-            if (errno != 0 || content_length_parsed < 0) {
+            gchar *end;
+            content_length_parsed = g_ascii_strtoll (hdrval, &end, 10);
+            if (errno != 0 || content_length_parsed < 0 || (conn->runtime_io &&
+                (!hdrval[0] || *end ||
+                 gst_rtsp_message_get_header (message, GST_RTSP_HDR_CONTENT_LENGTH, NULL, 1) == GST_RTSP_OK))) {
               res = GST_RTSP_EPARSE;
               goto invalid_body_len;
             } else if (content_length_parsed > conn->content_length_limit) {
@@ -2989,9 +3071,14 @@ gst_rtsp_connection_receive_usec (GstRTSPConnection * conn,
   /* configure timeout if any */
   set_read_socket_timeout (conn, timeout);
 
+  if (conn->runtime_io) {
+    g_byte_array_set_size (conn->received_bytes, 0);
+    conn->capturing = TRUE;
+  }
   memset (&builder, 0, sizeof (GstRTSPBuilder));
   res = build_next (&builder, message, conn, TRUE);
 
+  conn->capturing = FALSE;
   clear_read_socket_timeout (conn);
 
   if (G_UNLIKELY (res != GST_RTSP_OK))
@@ -3138,6 +3225,7 @@ gst_rtsp_connection_free (GstRTSPConnection * conn)
     conn->
         accept_certificate_destroy_notify (conn->accept_certificate_user_data);
 
+  g_clear_pointer (&conn->received_bytes, g_byte_array_unref);
   g_timer_destroy (conn->timer);
   gst_rtsp_url_free (conn->url);
   g_free (conn->proxy_host);
@@ -3189,6 +3277,21 @@ gst_rtsp_connection_poll_usec (GstRTSPConnection * conn, GstRTSPEvent events,
   g_return_val_if_fail (revents != NULL, GST_RTSP_EINVAL);
   g_return_val_if_fail (conn->read_socket != NULL, GST_RTSP_EINVAL);
   g_return_val_if_fail (conn->write_socket != NULL, GST_RTSP_EINVAL);
+
+  if (conn->runtime_io && events == GST_RTSP_EV_READ) {
+    GError *error = NULL;
+    cancellable = get_cancellable (conn);
+    gboolean ready = g_socket_condition_timed_wait (conn->read_socket,
+        G_IO_IN | G_IO_HUP | G_IO_ERR, timeout ? timeout : -1, cancellable, &error);
+    g_clear_object (&cancellable);
+    *revents = ready ? GST_RTSP_EV_READ : 0;
+    if (!ready) {
+      GstRTSPResult result = gst_rtsp_result_from_g_io_error (error, GST_RTSP_ESYS);
+      g_clear_error (&error);
+      return result;
+    }
+    return GST_RTSP_OK;
+  }
 
   ctx = g_main_context_new ();
 

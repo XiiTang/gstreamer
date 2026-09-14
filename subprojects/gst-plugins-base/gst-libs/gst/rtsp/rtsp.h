@@ -26,6 +26,7 @@
 
 #include <gst/rtsp/gstrtsp.h>
 #include <gst/rtsp/gstrtspconnection.h>
+#include <gst/rtsp/gstrtspruntimeclient.h>
 #include <gst/rtsp/gstrtspdefs.h>
 #include <gst/rtsp/gstrtsp-enumtypes.h>
 #include <gst/rtsp/gstrtspextension.h>

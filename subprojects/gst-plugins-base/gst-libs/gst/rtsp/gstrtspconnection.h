@@ -72,6 +72,20 @@ GstRTSPResult      gst_rtsp_connection_create_from_socket (GSocket * socket,
                                                        const gchar * initial_buffer,
                                                        GstRTSPConnection ** conn);
 
+/* Client mode over a Runtime-owned local transport bridge. This constructor
+ * never resolves names, creates remote sockets, performs TLS or sends requests.
+ * Connect/reconnect and automatic HTTP tunneling are unavailable in this mode.
+ * Receive remains cancellable after the first byte of a message. */
+GST_RTSP_API
+GstRTSPResult gst_rtsp_connection_create_runtime_client (const GstRTSPUrl *url,
+    GSocket *socket, guint body_limit, GstRTSPConnection **conn);
+GST_RTSP_API
+GBytes *gst_rtsp_connection_received_bytes (const GstRTSPConnection *conn);
+GST_RTSP_API
+gsize gst_rtsp_connection_written_bytes (const GstRTSPConnection *conn);
+GST_RTSP_API
+guint32 gst_rtsp_connection_next_cseq (const GstRTSPConnection *conn);
+
 GST_RTSP_API
 GstRTSPResult      gst_rtsp_connection_accept                 (GSocket * socket, GstRTSPConnection ** conn, GCancellable * cancellable);
 

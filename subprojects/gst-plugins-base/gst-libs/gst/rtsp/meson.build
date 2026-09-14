@@ -3,6 +3,7 @@ rtsp_sources = files([
   'gstrtspurl.c',
   'gstrtspmessage.c',
   'gstrtspconnection.c',
+  'gstrtspruntimeclient.c',
   'gstrtspdefs.c',
   'gstrtspextension.c',
   'gstrtsprange.c'
@@ -10,6 +11,7 @@ rtsp_sources = files([
 
 rtsp_headers = files([
   'gstrtspconnection.h',
+  'gstrtspruntimeclient.h',
   'gstrtspdefs.h',
   'gstrtspextension.h',
   'gstrtsp.h',
