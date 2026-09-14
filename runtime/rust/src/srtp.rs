@@ -69,6 +69,7 @@ unsafe extern "C" {
         restore: i32,
         out: *mut *mut c_void,
     ) -> i32;
+    fn gst_runtime_srtp_create_dtls(options: *const Options, out: *mut *mut c_void) -> i32;
     fn gst_runtime_srtp_export(context: *mut c_void, output: *mut u8, length: *mut usize) -> i32;
     fn gst_runtime_srtp_packet(
         context: *mut c_void,
@@ -94,12 +95,16 @@ impl Drop for Context {
 }
 impl Context {
     pub fn create(config: Configuration<'_>) -> Result<Self, Error> {
-        Self::open(config, None)
+        Self::open(config, None, false)
     }
     pub fn restore(config: Configuration<'_>, state: &[u8]) -> Result<Self, Error> {
-        Self::open(config, Some(state))
+        Self::open(config, Some(state), false)
     }
-    fn open(c: Configuration<'_>, state: Option<&[u8]>) -> Result<Self, Error> {
+    /// Fresh exporter key with DTLS profile lifetime; cannot be exported or restored.
+    pub fn create_dtls(config: Configuration<'_>) -> Result<Self, Error> {
+        Self::open(config, None, true)
+    }
+    fn open(c: Configuration<'_>, state: Option<&[u8]>, dtls: bool) -> Result<Self, Error> {
         crate::initialize();
         let options = Options {
             profile: c.profile as _,
@@ -112,13 +117,17 @@ impl Context {
         };
         let mut raw = std::ptr::null_mut();
         Error::check(unsafe {
-            gst_runtime_srtp_create(
-                &options,
-                state.map_or(std::ptr::null(), |s| s.as_ptr()),
-                state.map_or(0, |s| s.len()),
-                i32::from(state.is_some()),
-                &mut raw,
-            )
+            if dtls {
+                gst_runtime_srtp_create_dtls(&options, &mut raw)
+            } else {
+                gst_runtime_srtp_create(
+                    &options,
+                    state.map_or(std::ptr::null(), |s| s.as_ptr()),
+                    state.map_or(0, |s| s.len()),
+                    i32::from(state.is_some()),
+                    &mut raw,
+                )
+            }
         })?;
         Ok(Self {
             raw: NonNull::new(raw).ok_or(Error::INVALID)?,
