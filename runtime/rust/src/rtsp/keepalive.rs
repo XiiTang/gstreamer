@@ -190,22 +190,28 @@ impl State {
         if !complete || message.kind != 2 || message.status < 200 {
             return;
         }
+        // An ordinary request can advance the same selected Digest context.
+        // Follow that verified continuation for every declared cycle using it.
+        if (200..300).contains(&message.status) {
+            if let Some((previous, next)) = message
+                .authentication
+                .as_ref()
+                .and_then(|a| a.verified_continuation.as_ref())
+            {
+                for schedule in self.schedules.values_mut() {
+                    if let Some(authentication) = schedule.options.authentication.as_mut() {
+                        if authentication.challenge == *previous {
+                            authentication.challenge.clone_from(next);
+                        }
+                    }
+                }
+            }
+        }
         let Some(pending) = self.pending.take() else {
             return;
         };
         if let Some(schedule) = self.schedules.get_mut(&pending.session) {
             if (200..300).contains(&message.status) {
-                if let (Some(authentication), Some((previous, next))) = (
-                    schedule.options.authentication.as_mut(),
-                    message
-                        .authentication
-                        .as_ref()
-                        .and_then(|a| a.verified_continuation.as_ref()),
-                ) {
-                    if authentication.challenge == *previous {
-                        authentication.challenge.clone_from(next);
-                    }
-                }
                 if let Some(next) = Instant::now().checked_add(schedule.options.interval) {
                     schedule.next = next;
                 } else {
