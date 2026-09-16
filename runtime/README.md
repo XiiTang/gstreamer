@@ -1,6 +1,6 @@
-# IMAPipe native media integration
+# Boundless native media integration
 
-This fork keeps GStreamer's media engines and native state behind IMAPipe's
+This fork keeps GStreamer's media engines and native state behind Boundless's
 execution-owned network and resource boundary. The Runtime adapter and packaging
 are separate acceptance gates; the tests here are native-library evidence.
 
@@ -65,7 +65,7 @@ linkable symbol must not enable calls unavailable on the deployment OS.
 `tests/full_native.py` links the actual private artifact and tests RTSP, all seven
 payload formats, raw RTP, backpressure and joined stop. FFmpeg independently
 encodes the fixtures and decodes recovered H264/H265/JPEG for exact pixel checks.
-Optimized JPEG tables are a negative test. `IMAPIPE_MEDIA_PREFIX=<private-prefix>
+Optimized JPEG tables are a negative test. `BOUNDLESS_MEDIA_PREFIX=<private-prefix>
 cargo test --manifest-path runtime/rust/Cargo.toml` checks the safe owner ABI,
 repeated extension headers, binary bodies and cancellation with raw evidence.
 

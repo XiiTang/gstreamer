@@ -1,4 +1,4 @@
-use imapipe_media::payload::{self, Configuration, Format};
+use boundless_media::payload::{self, Configuration, Format};
 use std::{
     sync::mpsc,
     time::{Duration, Instant},

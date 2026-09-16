@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use imapipe_media::{
+use boundless_media::{
     Error,
     rtsp::{Rtsp, Version},
 };
@@ -260,8 +260,8 @@ fn incremental_owned_request_and_declared_data_progress_while_read_is_partial() 
     assert!(client.send_data_begin(6, b"wrong channel").is_err());
 }
 
-fn auth_policy() -> imapipe_media::rtsp_auth::Policy {
-    use imapipe_media::rtsp_auth::{Algorithm, Policy, Qop};
+fn auth_policy() -> boundless_media::rtsp_auth::Policy {
+    use boundless_media::rtsp_auth::{Algorithm, Policy, Qop};
     Policy {
         basic: true,
         algorithms: vec![Algorithm::Sha256],
@@ -272,7 +272,7 @@ fn auth_policy() -> imapipe_media::rtsp_auth::Policy {
 }
 #[test]
 fn explicit_digest_dispatch_redacts_challenges_and_fails_closed_on_bad_proof() {
-    use imapipe_media::rtsp_auth::Qop;
+    use boundless_media::rtsp_auth::Qop;
     let (stream, mut server) = UnixStream::pair().unwrap();
     server.set_read_timeout(Some(SECOND)).unwrap();
     let mut client = Rtsp::from_stream(stream.into(), URI, Version::V2, 4096).unwrap();
@@ -340,7 +340,7 @@ fn explicit_digest_dispatch_redacts_challenges_and_fails_closed_on_bad_proof() {
     assert_eq!(message.authentication.unwrap().server_proof, Some(false));
     assert_eq!(
         client.state("s", URI).unwrap(),
-        Some(imapipe_media::rtsp::TrackState::Unknown)
+        Some(boundless_media::rtsp::TrackState::Unknown)
     );
 }
 #[test]
@@ -418,7 +418,7 @@ fn session_timeout_is_lossless_and_explicit_keepalive_preserves_the_track() {
         assert!(info.control_response_age < SECOND);
         assert_eq!(
             client.state("retained-session", URI).unwrap(),
-            Some(imapipe_media::rtsp::TrackState::Ready)
+            Some(boundless_media::rtsp::TrackState::Ready)
         );
     }
 }

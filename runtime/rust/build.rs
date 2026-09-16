@@ -1,9 +1,9 @@
 use sha2::{Digest, Sha256};
 use std::{env, fs, path::PathBuf, process::Command};
 fn main() {
-    println!("cargo:rerun-if-env-changed=IMAPIPE_MEDIA_PREFIX");
-    let prefix = PathBuf::from(env::var_os("IMAPIPE_MEDIA_PREFIX").expect(
-        "Build the pinned private media artifact with runtime/build_native.py and set IMAPIPE_MEDIA_PREFIX; system GStreamer plugins are not supported",
+    println!("cargo:rerun-if-env-changed=BOUNDLESS_MEDIA_PREFIX");
+    let prefix = PathBuf::from(env::var_os("BOUNDLESS_MEDIA_PREFIX").expect(
+        "Build the pinned private media artifact with runtime/build_native.py and set BOUNDLESS_MEDIA_PREFIX; system GStreamer plugins are not supported",
     ));
     let manifest = prefix.join("build.json");
     println!("cargo:rerun-if-changed={}", manifest.display());

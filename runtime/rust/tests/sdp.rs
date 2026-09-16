@@ -1,11 +1,11 @@
-use imapipe_media::sdp::{Description, Parameter};
+use boundless_media::sdp::{Description, Parameter};
 #[test]
 #[ignore = "requires independent FFmpeg executable"]
 fn independent_ffmpeg_pcmu_description_retains_actual_payload_mapping() {
-    let executable = std::env::var_os("IMAPIPE_FFMPEG").expect("explicit FFmpeg executable");
+    let executable = std::env::var_os("BOUNDLESS_FFMPEG").expect("explicit FFmpeg executable");
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let path = std::env::temp_dir().join(format!(
-        "imapipe-sdp-{}-{}.sdp",
+        "boundless-sdp-{}-{}.sdp",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -55,7 +55,7 @@ fn independent_ffmpeg_pcmu_description_retains_actual_payload_mapping() {
 
 #[test]
 fn selected_description_owns_caps_and_enforces_the_negotiated_track() {
-    use imapipe_media::{
+    use boundless_media::{
         rtp,
         sdp::{Selection, Track},
     };

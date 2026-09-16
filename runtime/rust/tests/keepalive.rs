@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use imapipe_media::{
+use boundless_media::{
     Error,
     rtsp::{Keepalive, KeepaliveEventKind, KeepaliveFailure, KeepaliveMethod, Rtsp, Version},
 };
@@ -27,7 +27,7 @@ impl Drop for Peer {
         self.thread.take().unwrap().join().unwrap();
     }
 }
-fn receive(native: &mut Rtsp) -> imapipe_media::rtsp::Message {
+fn receive(native: &mut Rtsp) -> boundless_media::rtsp::Message {
     let end = Instant::now() + Duration::from_secs(2);
     loop {
         let (result, message) = native.receive_step();
@@ -250,7 +250,7 @@ fn cancelling_an_inflight_cycle_retains_its_response_deadline_and_unknown_outcom
                 assert_eq!(failure.dispatch.sequence, 2);
                 assert_eq!(
                     native.state("s", URI).unwrap(),
-                    Some(imapipe_media::rtsp::TrackState::Unknown)
+                    Some(boundless_media::rtsp::TrackState::Unknown)
                 );
                 break;
             }
@@ -302,7 +302,7 @@ fn maintenance_waits_for_explicit_control_and_stops_after_teardown() {
 
 #[test]
 fn declared_digest_cycle_follows_only_verified_nonce_continuation() {
-    use imapipe_media::{
+    use boundless_media::{
         rtsp::KeepaliveAuthentication,
         rtsp_auth::{Algorithm, Policy, Qop},
     };

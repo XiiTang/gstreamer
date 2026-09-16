@@ -1,4 +1,4 @@
-"""Build IMAPipe's closed set of native media components.
+"""Build Boundless's closed set of native media components.
 
 The private gst-full build has no filesystem plugin registry, dynamic plugin
 scan, command-line pipeline parser, tracers, or GStreamer debug/key dumps.
@@ -49,7 +49,7 @@ if sys.platform == 'darwin':
                  '-Dobjc_args=-Werror=unguarded-availability-new'])
 if (a.build/'meson-private/coredata.dat').exists():command.extend(['--reconfigure','--clearcache'])
 a.build.mkdir(parents=True,exist_ok=True)
-(a.build/'imapipe-configuration.json').write_text(json.dumps(command,indent=2)+'\n')
+(a.build/'boundless-configuration.json').write_text(json.dumps(command,indent=2)+'\n')
 subprocess.run(command,env=env,check=True)
 if not a.configure_only:
  subprocess.run([a.meson,'compile','-C',str(a.build),'-j',str(a.jobs),'gstreamer-full-1.0'],env=env,check=True)
