@@ -42,7 +42,7 @@ options=['-Dpkg_config_path='+','.join(str(path/'lib/pkgconfig') for path in a.d
  '-Dgst-plugins-base:app=enabled','-Dgst-plugins-good:rtp=enabled',
  '-Dgst-plugins-good:rtpmanager=enabled','-Dgst-plugins-bad:srtp=enabled',
  '-Dgst-plugins-bad:dtls=enabled','-Dgst-full=enabled',
- '-Dgst-full-libraries=gstreamer-app-1.0,gstreamer-rtp-1.0,gstreamer-rtsp-1.0,gstreamer-sdp-1.0','-Dgst-full-plugins='+(';'.join((('gst'+name+'.lib') if os.name=='nt' else ('libgst'+name+'.a')) for name in ['app','rtp','rtpmanager','srtp','dtls']))]
+ '-Dgst-full-libraries=gstreamer-app-1.0,gstreamer-rtp-1.0,gstreamer-rtsp-1.0,gstreamer-sdp-1.0','-Dgst-full-plugins='+(';'.join(('libgst'+name+'.a') for name in ['app','rtp','rtpmanager','srtp','dtls']))]
 command=[a.meson,'setup',str(a.build.resolve()),str(source),'--prefix='+str(a.prefix.resolve()),*options]
 if sys.platform == 'darwin':
  command.extend(['-Dc_args=-Werror=unguarded-availability-new',
