@@ -1,5 +1,5 @@
-//! Explicit RTSP challenge contexts. All password material and response proofs
-//! stay private to the media library; observations contain only safe metadata.
+//! Explicit RTSP challenge contexts. Request credentials stay private; received
+//! responses remain intact alongside authentication observations.
 use crate::Error;
 use http_auth::{
     BasicClient, DigestClient, PasswordParams,
@@ -170,22 +170,21 @@ impl Auth {
     pub(crate) fn response(
         &mut self,
         status: i32,
-        headers: &mut Vec<(Vec<u8>, Vec<u8>)>,
+        headers: &[(Vec<u8>, Vec<u8>)],
         body: &[u8],
-        raw: &mut Vec<u8>,
     ) -> Result<Observation, Error> {
         let mut observation = Observation::default();
         let mut challenges = Vec::new();
         let mut info = None;
         let mut malformed = false;
-        for (name, value) in headers.iter_mut() {
+        for (name, value) in headers.iter() {
             if name.eq_ignore_ascii_case(b"www-authenticate")
                 || name.eq_ignore_ascii_case(b"authentication-info")
                 || name.eq_ignore_ascii_case(b"proxy-authenticate")
                 || name.eq_ignore_ascii_case(b"proxy-authentication-info")
             {
                 observation.protected_headers = true;
-                let value = Zeroizing::new(std::mem::take(value));
+                let value = Zeroizing::new(value.clone());
                 if name.eq_ignore_ascii_case(b"www-authenticate") {
                     challenges.push(value);
                 } else if name.eq_ignore_ascii_case(b"authentication-info") {
@@ -194,10 +193,6 @@ impl Auth {
                     }
                 }
             }
-        }
-        if observation.protected_headers {
-            raw.zeroize();
-            raw.clear();
         }
         if malformed {
             return Err(Error::AUTHENTICATION);

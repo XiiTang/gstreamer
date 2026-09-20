@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Version {
@@ -257,29 +257,12 @@ impl Rtsp {
             return Ok(());
         };
         if !valid {
-            message.raw.zeroize();
-            message.raw.clear();
-            for (name, value) in &mut message.headers {
-                if name.eq_ignore_ascii_case(b"www-authenticate")
-                    || name.eq_ignore_ascii_case(b"authentication-info")
-                    || name.eq_ignore_ascii_case(b"proxy-authenticate")
-                    || name.eq_ignore_ascii_case(b"proxy-authentication-info")
-                {
-                    value.zeroize();
-                    value.clear();
-                }
-            }
             message.authentication = Some(crate::rtsp_auth::Observation {
                 protected_headers: true,
                 ..Default::default()
             });
         } else if complete && message.kind == 2 {
-            match auth.response(
-                message.status,
-                &mut message.headers,
-                &message.body,
-                &mut message.raw,
-            ) {
+            match auth.response(message.status, &message.headers, &message.body) {
                 Ok(observation) => message.authentication = Some(observation),
                 Err(error) => {
                     message.authentication = Some(crate::rtsp_auth::Observation {

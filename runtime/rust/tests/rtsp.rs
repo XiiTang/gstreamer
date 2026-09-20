@@ -271,7 +271,7 @@ fn auth_policy() -> boundless_media::rtsp_auth::Policy {
     }
 }
 #[test]
-fn explicit_digest_dispatch_redacts_challenges_and_fails_closed_on_bad_proof() {
+fn explicit_digest_dispatch_preserves_challenges_and_fails_closed_on_bad_proof() {
     use boundless_media::rtsp_auth::Qop;
     let (stream, mut server) = UnixStream::pair().unwrap();
     server.set_read_timeout(Some(SECOND)).unwrap();
@@ -290,13 +290,15 @@ fn explicit_digest_dispatch_redacts_challenges_and_fails_closed_on_bad_proof() {
     let (result, message) = client.receive(SECOND);
     result.unwrap();
     assert_eq!(message.status, 401);
-    assert!(message.raw.is_empty());
+    assert!(!message.raw.is_empty());
     assert!(
         message
             .headers
             .iter()
             .filter(|(n, _)| n.eq_ignore_ascii_case(b"www-authenticate"))
-            .all(|(_, v)| v.is_empty())
+            .all(|(_, v)| v
+                .windows(b"private-nonce".len())
+                .any(|w| w == b"private-nonce"))
     );
     let auth = message.authentication.unwrap();
     assert!(auth.protected_headers);
@@ -336,7 +338,7 @@ fn explicit_digest_dispatch_redacts_challenges_and_fails_closed_on_bad_proof() {
     server.write_all(b"RTSP/2.0 200 OK\r\nCSeq: 2\r\nSession: s\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\nAuthentication-Info: rspauth=\"wrong\"\r\n\r\n").unwrap();
     let (result, message) = client.receive(SECOND);
     assert_eq!(result, Err(Error::AUTHENTICATION));
-    assert!(message.raw.is_empty());
+    assert!(!message.raw.is_empty());
     assert_eq!(message.authentication.unwrap().server_proof, Some(false));
     assert_eq!(
         client.state("s", URI).unwrap(),
