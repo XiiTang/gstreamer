@@ -52,6 +52,11 @@ pub struct Address {
     pub port: u16,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionBinding {
+    pub aggregate_uri: String,
+    pub generation: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     pub timeout_seconds: u64,
     pub timeout_explicit: bool,
@@ -577,6 +582,48 @@ impl Rtsp {
             destination_addresses: addresses(view.dest_host, view.dest_port, view.dest_count)?,
             ssrcs,
         }))
+    }
+    pub fn session_binding(&mut self, session: &str) -> Result<Option<SessionBinding>, Error> {
+        let session = text(session)?;
+        let mut aggregate = std::ptr::null();
+        let mut generation = std::ptr::null();
+        match unsafe {
+            ffi::gst_runtime_rtsp_session_binding(
+                self.inner.0.as_ptr(),
+                session.as_ptr(),
+                &mut aggregate,
+                &mut generation,
+            )
+        } {
+            0 => Ok(Some(SessionBinding {
+                aggregate_uri: unsafe { std::ffi::CStr::from_ptr(aggregate) }
+                    .to_string_lossy()
+                    .into_owned(),
+                generation: unsafe { std::ffi::CStr::from_ptr(generation) }
+                    .to_string_lossy()
+                    .into_owned(),
+            })),
+            1 => Ok(None),
+            value => Err(Error(value)),
+        }
+    }
+    pub fn bind_aggregate(
+        &mut self,
+        session: &str,
+        uri: &str,
+        generation: &str,
+    ) -> Result<(), Error> {
+        let session = text(session)?;
+        let uri = text(uri)?;
+        let generation = text(generation)?;
+        Error::check(unsafe {
+            ffi::gst_runtime_rtsp_bind_aggregate(
+                self.inner.0.as_ptr(),
+                session.as_ptr(),
+                uri.as_ptr(),
+                generation.as_ptr(),
+            )
+        })
     }
     pub fn session_info(&mut self, session: &str) -> Result<Option<SessionInfo>, Error> {
         let session = CString::new(session).map_err(|_| Error::INVALID)?;

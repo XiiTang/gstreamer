@@ -327,3 +327,17 @@ gst_runtime_rtsp_session_active (GstRuntimeRtsp *client, const char *session)
 {
   return client && gst_rtsp_runtime_client_session_active (client->client, session);
 }
+
+int
+gst_runtime_rtsp_session_binding (GstRuntimeRtsp *client, const char *session,
+                                  const char **aggregate, const char **generation)
+{
+  return gst_rtsp_runtime_client_session_binding (client->client, session, aggregate,
+                                                  generation) ? 0 : 1;
+}
+int
+gst_runtime_rtsp_bind_aggregate (GstRuntimeRtsp *client, const char *session,
+                                 const char *uri, const char *generation)
+{
+  return gst_rtsp_runtime_client_bind_aggregate (client->client, session, uri, generation);
+}

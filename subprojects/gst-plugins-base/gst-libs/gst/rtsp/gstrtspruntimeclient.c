@@ -18,6 +18,7 @@ track_free (gpointer value)
 typedef struct
 {
   gchar *aggregate;
+  gchar *generation;
   GHashTable *tracks;
   guint64 timeout_seconds;
   gboolean timeout_explicit;
@@ -40,6 +41,7 @@ session_free (gpointer data)
 {
   RuntimeSession *session = data;
   g_free (session->aggregate);
+  g_free (session->generation);
   g_hash_table_unref (session->tracks);
   g_free (session);
 }
@@ -73,6 +75,17 @@ transition (GstRTSPRuntimeClient *client, RuntimeSession *session, GstRTSPRuntim
     {
       ((RuntimeTrack *)g_hash_table_lookup (session->tracks, client->uri))->state = state;
     }
+}
+static gboolean
+session_live (RuntimeSession *session)
+{
+  GHashTableIter iter;
+  gpointer value;
+  g_hash_table_iter_init (&iter, session->tracks);
+  while (g_hash_table_iter_next (&iter, NULL, &value))
+    if (((RuntimeTrack *)value)->state != GST_RTSP_RUNTIME_CLOSED)
+      return TRUE;
+  return FALSE;
 }
 static GstRTSPResult
 unknown (GstRTSPRuntimeClient *client, GstRTSPResult result)
@@ -416,8 +429,16 @@ receive_result (GstRTSPRuntimeClient *client, GstRTSPMessage *message, GstRTSPRe
             {
               session = g_new0 (RuntimeSession, 1);
               session->aggregate = g_strdup (client->root);
+              session->generation = g_uuid_string_random ();
               session->tracks = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, track_free);
               g_hash_table_insert (client->sessions, g_strdup (id), session);
+            }
+          if (!session_live (session) && g_hash_table_size (session->tracks))
+            {
+              g_free (session->generation);
+              session->generation = g_uuid_string_random ();
+              g_free (session->aggregate);
+              session->aggregate = g_strdup (client->root);
             }
           session->timeout_seconds = timeout_seconds;
           session->timeout_explicit = timeout_explicit;
@@ -628,4 +649,28 @@ gst_rtsp_runtime_client_session_active (GstRTSPRuntimeClient *client, const gcha
         return TRUE;
     }
   return FALSE;
+}
+
+gboolean
+gst_rtsp_runtime_client_session_binding (GstRTSPRuntimeClient *client, const gchar *id,
+                                         const gchar **aggregate, const gchar **generation)
+{
+  RuntimeSession *session = lookup (client, id);
+  if (!session || !session_live (session))
+    return FALSE;
+  *aggregate = session->aggregate;
+  *generation = session->generation;
+  return TRUE;
+}
+GstRTSPResult
+gst_rtsp_runtime_client_bind_aggregate (GstRTSPRuntimeClient *client, const gchar *id,
+                                       const gchar *uri, const gchar *generation)
+{
+  RuntimeSession *session = lookup (client, id);
+  if (client->unknown || client->pending || !session || !session_live (session)
+      || !valid_uri (uri) || !generation || strcmp (generation, session->generation))
+    return GST_RTSP_EINVAL;
+  g_free (session->aggregate);
+  session->aggregate = g_strdup (uri);
+  return GST_RTSP_OK;
 }

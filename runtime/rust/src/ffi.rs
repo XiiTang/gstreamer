@@ -46,6 +46,19 @@ pub struct TransportView {
     pub generation: u64,
 }
 unsafe extern "C" {
+    pub fn gst_runtime_rtsp_session_binding(
+        client: *mut c_void,
+        session: *const c_char,
+        aggregate: *mut *const c_char,
+        generation: *mut *const c_char,
+    ) -> c_int;
+    pub fn gst_runtime_rtsp_bind_aggregate(
+        client: *mut c_void,
+        session: *const c_char,
+        uri: *const c_char,
+        generation: *const c_char,
+    ) -> c_int;
+
     pub fn gst_runtime_rtsp_session_info(
         client: *mut c_void,
         session: *const c_char,

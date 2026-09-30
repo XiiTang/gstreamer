@@ -38,6 +38,7 @@ pub struct Configuration<'a> {
 pub struct Error(pub i32);
 impl Error {
     pub const INVALID: Self = Self(2);
+    pub const MALFORMED_PACKET: Self = Self(-100);
     pub const REPLAY: Self = Self(9);
     pub const TOO_OLD: Self = Self(10);
     pub const KEY_EXPIRED: Self = Self(15);
@@ -82,6 +83,7 @@ unsafe extern "C" {
     fn gst_runtime_srtp_free(context: *mut c_void);
 }
 pub struct Context {
+    profile: Profile,
     raw: NonNull<c_void>,
     _exclusive: PhantomData<Cell<()>>,
 }
@@ -130,6 +132,7 @@ impl Context {
             }
         })?;
         Ok(Self {
+            profile: c.profile,
             raw: NonNull::new(raw).ok_or(Error::INVALID)?,
             _exclusive: PhantomData,
         })
@@ -154,6 +157,33 @@ impl Context {
         self.packet(true, rtcp, bytes)
     }
     pub fn unprotect(&mut self, rtcp: bool, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+        // Only header lengths and version are checked here, before any native
+        // state mutation. Other bad_param results remain fatal state errors.
+        let tag = match self.profile {
+            Profile::AesCm128HmacSha1_80 => 10,
+            _ => 16,
+        };
+        let minimum = if rtcp { 8 + 4 + tag } else { 12 + tag };
+        if bytes.len() < minimum || bytes[0] >> 6 != 2 {
+            return Err(Error::MALFORMED_PACKET);
+        }
+        if !rtcp {
+            let mut header = 12 + usize::from(bytes[0] & 15) * 4;
+            let plain = bytes.len() - tag;
+            if header > plain {
+                return Err(Error::MALFORMED_PACKET);
+            }
+            if bytes[0] & 16 != 0 {
+                if header + 4 > plain {
+                    return Err(Error::MALFORMED_PACKET);
+                }
+                let words = u16::from_be_bytes([bytes[header + 2], bytes[header + 3]]) as usize;
+                header += 4 + words * 4;
+                if header > plain {
+                    return Err(Error::MALFORMED_PACKET);
+                }
+            }
+        }
         self.packet(false, rtcp, bytes)
     }
     fn packet(&mut self, sending: bool, rtcp: bool, bytes: &[u8]) -> Result<Vec<u8>, Error> {
@@ -192,6 +222,38 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn malformed_unauthenticated_headers_preserve_context() {
+        for profile in [
+            Profile::AesCm128HmacSha1_80,
+            Profile::AeadAes128Gcm,
+            Profile::AeadAes256Gcm,
+        ] {
+            let key = vec![7; profile.key_length()];
+            let config = Configuration {
+                profile,
+                direction: Direction::Both,
+                key: &key,
+                replay_window: 128,
+                encrypted_extensions: &[],
+            };
+            let mut tx = Context::create(config).unwrap();
+            let mut rx = Context::create(config).unwrap();
+            let before = rx.export().unwrap();
+            for rtcp in [false, true] {
+                for bytes in [vec![], vec![128], vec![128; 11], vec![255; 64]] {
+                    assert_eq!(
+                        rx.unprotect(rtcp, &bytes).unwrap_err(),
+                        Error::MALFORMED_PACKET
+                    );
+                    assert_eq!(rx.export().unwrap(), before);
+                }
+            }
+            let packet = [128, 96, 0, 1, 0, 0, 0, 1, 0, 0, 0, 7, 9];
+            let wire = tx.protect(false, &packet).unwrap();
+            assert_eq!(rx.unprotect(false, &wire).unwrap(), packet);
+        }
+    }
     #[test]
     fn restored_owners_preserve_rtp_and_rtcp_replay() {
         for profile in [
