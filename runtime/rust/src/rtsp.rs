@@ -464,6 +464,11 @@ impl Rtsp {
     }
     /// False means a retained partial message. No partial event is published;
     /// the next complete message or terminal error includes its exact raw bytes.
+    /// Native control request may have been sent and has no correlated response.
+    pub fn pending_dispatch(&self) -> Option<u32> {
+        let mut sequence = 0;
+        (unsafe { ffi::gst_runtime_rtsp_pending_dispatch(self.inner.0.as_ptr(), &mut sequence) } != 0).then_some(sequence)
+    }
     pub fn receive_step(&mut self) -> (Result<bool, Error>, Message) {
         let mut message = std::ptr::null_mut();
         let code =

@@ -341,3 +341,9 @@ gst_runtime_rtsp_bind_aggregate (GstRuntimeRtsp *client, const char *session,
 {
   return gst_rtsp_runtime_client_bind_aggregate (client->client, session, uri, generation);
 }
+
+int gst_runtime_rtsp_pending_dispatch (GstRuntimeRtsp *client, guint32 *sequence)
+{
+  *sequence = gst_rtsp_runtime_client_cseq (client->client);
+  return gst_rtsp_runtime_client_dispatch (client->client) == GST_RTSP_RUNTIME_MAYBE_SENT;
+}

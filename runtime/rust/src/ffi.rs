@@ -141,6 +141,7 @@ unsafe extern "C" {
         timeout: i64,
         out: *mut *mut c_void,
     ) -> c_int;
+    pub fn gst_runtime_rtsp_pending_dispatch(client: *mut c_void, sequence: *mut u32) -> i32;
     pub fn gst_runtime_rtsp_receive_step(client: *mut c_void, out: *mut *mut c_void) -> c_int;
     pub fn gst_runtime_rtsp_message_view(message: *mut c_void, view: *mut MessageView);
     pub fn gst_runtime_rtsp_message_header(
