@@ -132,3 +132,19 @@ tests independently verify SHA-256 request and response proofs, nonce-count rese
 and subsequent increment for both RTSP versions and auth/auth-int.
 Verified nonce changes from ordinary explicit requests also advance declared
 cycles selecting that same context; unrelated challenge selections are untouched.
+
+## H264/H265 dropped RTP extensions (2026-10-02)
+
+Backport the three commits from MR !12389: bb387b3c7bea6d275d20b13af8c622bd465f7c69,
+9e627c3d881fedafb6400ac60fb94404d7305145 and a7e6f79e3b5d17fc077c01552663a1e09ab0c280.
+Clear delayed/cached extensions when FU/NALs are dropped, including waiting for
+a keyframe. Keep the 1.28.7 baseline, native 16 MiB materialization limits and
+DTLS key ownership.
+
+`tests/depay_extensions.c` exercises both native depayloaders synchronously.
+It observes exact extension callbacks across 1024 interrupted-FU/empty-NAL
+transitions plus 1024 consecutive empty aggregation drops, then clean output.
+The original pinned artifact fails (2047 extension callbacks versus 1024); the
+repaired artifact passes and carries no stale extension into the next output.
+`tests/full_native.py` includes this test and the existing independent FFmpeg
+pixel, seven payload formats, bounded access-unit/backpressure and stop checks.
