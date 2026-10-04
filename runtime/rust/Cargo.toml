@@ -17,7 +17,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 
 [dependencies]
-http-auth = { git = "https://github.com/XiiTang/http-auth", rev = "cc6d41539c55678ba4614e62c22455d203a530e6" }
+http-auth = { git = "https://github.com/XiiTang/http-auth", rev = "2477a14f2ca9eb16d8281f803030e144670fad28" }
 zeroize = "1.8"
 uuid = { version = "1", features = ["v4"] }
 

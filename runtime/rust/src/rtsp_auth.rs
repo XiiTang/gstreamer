@@ -3,7 +3,7 @@
 use crate::Error;
 use http_auth::{
     BasicClient, DigestClient, PasswordParams,
-    digest::{Algorithm as Hash, Qop as HttpQop, ServerProof},
+    digest::{Algorithm as Hash, Qop as HttpQop, ServerInfo, ServerProof},
 };
 use zeroize::{Zeroize, Zeroizing};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,8 +175,8 @@ impl Auth {
     ) -> Result<Observation, Error> {
         let mut observation = Observation::default();
         let mut challenges = Vec::new();
-        let mut info = None;
-        let mut malformed = false;
+        // Every line of the field; http-auth reads them as one list.
+        let mut info = Vec::new();
         for (name, value) in headers.iter() {
             if name.eq_ignore_ascii_case(b"www-authenticate")
                 || name.eq_ignore_ascii_case(b"authentication-info")
@@ -188,14 +188,9 @@ impl Auth {
                 if name.eq_ignore_ascii_case(b"www-authenticate") {
                     challenges.push(value);
                 } else if name.eq_ignore_ascii_case(b"authentication-info") {
-                    if info.replace(value).is_some() {
-                        malformed = true;
-                    }
+                    info.push(value);
                 }
             }
-        }
-        if malformed {
-            return Err(Error::AUTHENTICATION);
         }
         if status < 200 {
             return Ok(observation);
@@ -281,18 +276,18 @@ impl Auth {
             return Ok(observation);
         }
         if let Some(proof) = pending.as_ref().and_then(|pending| pending.proof.as_ref()) {
-            match info {
-                None if self.policy.require_server_proof => return Err(Error::AUTHENTICATION),
-                None => observation.server_proof = Some(false),
-                Some(info) => {
-                    let next = proof
-                        .verify(
-                            std::str::from_utf8(&info).map_err(|_| Error::AUTHENTICATION)?,
-                            body,
-                        )
-                        .map_err(|_| Error::AUTHENTICATION)?;
+            let lines = info.iter().map(|line| line.as_slice());
+            match proof
+                .verify(lines, body)
+                .map_err(|_| Error::AUTHENTICATION)?
+            {
+                ServerInfo::Unproven if self.policy.require_server_proof => {
+                    return Err(Error::AUTHENTICATION);
+                }
+                ServerInfo::Unproven => observation.server_proof = Some(false),
+                ServerInfo::Proven { next_nonce } => {
                     observation.server_proof = Some(true);
-                    if let Some(next) = next {
+                    if let Some(next) = next_nonce {
                         let next = Zeroizing::new(next);
                         let context = &pending.as_ref().unwrap().context;
                         let offered = self
@@ -315,7 +310,7 @@ impl Auth {
                     }
                 }
             }
-        } else if info.is_some() {
+        } else if !info.is_empty() {
             return Err(Error::AUTHENTICATION);
         }
         Ok(observation)

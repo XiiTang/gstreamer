@@ -18,6 +18,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "boundless-media"
+version = "0.1.0"
+dependencies = [
+ "http-auth",
+ "serde_json",
+ "sha2",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -123,7 +134,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 [[package]]
 name = "http-auth"
 version = "0.1.10"
-source = "git+https://github.com/XiiTang/http-auth?rev=cc6d41539c55678ba4614e62c22455d203a530e6#cc6d41539c55678ba4614e62c22455d203a530e6"
+source = "git+https://github.com/XiiTang/http-auth?rev=2477a14f2ca9eb16d8281f803030e144670fad28#2477a14f2ca9eb16d8281f803030e144670fad28"
 dependencies = [
  "base64",
  "digest",
@@ -134,17 +145,6 @@ dependencies = [
  "sha2",
  "subtle",
  "unicode-normalization",
- "zeroize",
-]
-
-[[package]]
-name = "boundless-media"
-version = "0.1.0"
-dependencies = [
- "http-auth",
- "serde_json",
- "sha2",
- "uuid",
  "zeroize",
 ]
 

@@ -424,3 +424,75 @@ fn session_timeout_is_lossless_and_explicit_keepalive_preserves_the_track() {
         );
     }
 }
+
+/// Without qop a reply may carry only a nextnonce, which proves nothing and is
+/// not adopted; a proof split over two Authentication-Info lines is one list.
+#[test]
+fn digest_info_without_qop_proves_nothing_and_its_lines_are_one_list() {
+    use boundless_media::rtsp_auth::{Algorithm, Policy, Qop};
+    use sha2::{Digest, Sha256};
+    let hash = |text: String| format!("{:x}", Sha256::digest(text.as_bytes()));
+    let rspauth = hash(format!(
+        "{}:n1:{}",
+        hash("user:camera:private-password".into()),
+        hash(format!(":{URI}"))
+    ));
+    for required in [false, true] {
+        let (stream, mut server) = UnixStream::pair().unwrap();
+        server.set_read_timeout(Some(SECOND)).unwrap();
+        let mut client = Rtsp::from_stream(stream.into(), URI, Version::V2, 4096).unwrap();
+        let policy = Policy {
+            basic: false,
+            algorithms: vec![Algorithm::Sha256],
+            qops: vec![Qop::None],
+            realm: None,
+            require_server_proof: required,
+        };
+        client
+            .configure_authentication(
+                "user".to_owned().into(),
+                "private-password".to_owned().into(),
+                policy,
+                true,
+            )
+            .unwrap();
+        client.request("OPTIONS", URI, &[], &[], SECOND).0.unwrap();
+        request(&mut server);
+        server.write_all(b"RTSP/2.0 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Digest realm=\"camera\", nonce=\"n1\", algorithm=SHA-256\r\n\r\n").unwrap();
+        let (result, message) = client.receive(SECOND);
+        result.unwrap();
+        let id = message.authentication.unwrap().challenges[0].id.clone();
+        let mut send = |sequence: u32, info: &str| {
+            let (result, _) =
+                client.request_authenticated_begin("OPTIONS", URI, &[], &[], &id, Qop::None);
+            assert_eq!(result, Ok(true));
+            while !client.write_step().0.unwrap() {}
+            let sent = String::from_utf8(request(&mut server)).unwrap();
+            assert!(sent.contains("nonce=\"n1\""), "{sent}");
+            server
+                .write_all(format!("RTSP/2.0 200 OK\r\nCSeq: {sequence}\r\n{info}\r\n").as_bytes())
+                .unwrap();
+            client.receive(SECOND)
+        };
+        let (result, message) = send(2, "Authentication-Info: nextnonce=\"n2\"\r\n");
+        if required {
+            assert_eq!(result, Err(Error::AUTHENTICATION));
+            continue;
+        }
+        result.unwrap();
+        let observed = message.authentication.unwrap();
+        assert_eq!(observed.server_proof, Some(false));
+        assert!(observed.challenges.is_empty());
+        // The unproven nextnonce was not adopted: the next answer keeps n1.
+        let (result, message) = send(
+            3,
+            &format!(
+                "Authentication-Info: nextnonce=\"n3\"\r\nAuthentication-Info: rspauth=\"{rspauth}\"\r\n"
+            ),
+        );
+        result.unwrap();
+        let observed = message.authentication.unwrap();
+        assert_eq!(observed.server_proof, Some(true));
+        assert_eq!(observed.challenges.len(), 1);
+    }
+}
