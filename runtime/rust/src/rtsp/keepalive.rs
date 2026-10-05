@@ -1,8 +1,7 @@
-//! What the RTSP owner sends itself, on the same exclusive owner: declared
-//! session keepalives, and a request sent again with the answer to its 401.
-//! The caller polls this with receive_step; no thread, socket or alternate
-//! identity.
+//! Declared session maintenance on the same exclusive RTSP owner. The caller
+//! polls this with receive_step; no thread, socket, retry or alternate identity.
 use super::{Dispatch, Error, Message, Rtsp, text};
+use crate::rtsp_auth::Qop;
 use std::{
     collections::BTreeMap,
     ffi::{c_char, c_void},
@@ -27,12 +26,18 @@ impl KeepaliveMethod {
     }
 }
 #[derive(Clone, Debug)]
+pub struct KeepaliveAuthentication {
+    pub challenge: String,
+    pub qop: Qop,
+}
+#[derive(Clone, Debug)]
 pub struct Keepalive {
     pub uri: String,
     pub method: KeepaliveMethod,
     pub interval: Duration,
     /// Bounds the complete keepalive write and response, not the remote session.
     pub response_timeout: Duration,
+    pub authentication: Option<KeepaliveAuthentication>,
 }
 #[derive(Clone)]
 pub struct KeepaliveCancellation(Arc<AtomicBool>);
@@ -68,11 +73,9 @@ pub struct KeepaliveEvent {
     pub sequence: Option<u32>,
     pub kind: KeepaliveEventKind,
 }
-/// A request the owner sent itself failed, and the client with it: a
-/// keepalive for `session`, or with none a request sent again with an answer.
 #[derive(Clone, Debug)]
-pub struct MaintenanceFailure {
-    pub session: Option<String>,
+pub struct KeepaliveFailure {
+    pub session: String,
     pub dispatch: Dispatch,
     pub error: Error,
 }
@@ -94,6 +97,7 @@ pub(super) struct State {
     event: Option<KeepaliveEvent>,
 }
 unsafe extern "C" {
+    fn gst_runtime_rtsp_request_ready(client: *mut c_void) -> i32;
     fn gst_runtime_rtsp_session_active(client: *mut c_void, session: *const c_char) -> i32;
 }
 fn active(native: &Rtsp, session: &str) -> Result<bool, Error> {
@@ -164,31 +168,15 @@ impl Rtsp {
             writing: pending.is_some_and(|p| p.writing),
         })
     }
-    /// A request the owner sends itself is due, being written or awaiting its
-    /// response: the caller's own requests wait.
-    pub fn maintenance_pending(&self) -> bool {
+    pub fn keepalive_pending(&self) -> bool {
         self.keepalives.pending.is_some()
-            || self.authentication.as_ref().is_some_and(|auth| auth.busy())
     }
-    /// A request the owner sends itself is being written: other writes wait.
-    pub fn maintenance_writing(&self) -> bool {
+    pub fn keepalive_writing(&self) -> bool {
         self.keepalives.pending.as_ref().is_some_and(|p| p.writing)
-            || self
-                .authentication
-                .as_ref()
-                .is_some_and(|auth| auth.writing)
     }
-    /// Drives what the owner sends itself: a request sent again with an
-    /// answer, then declared keepalives. Responses still leave through
-    /// receive_step with their original headers, body and authentication
-    /// evidence.
-    pub fn maintain(&mut self) -> Result<Option<KeepaliveEvent>, MaintenanceFailure> {
-        self.answer_step()
-            .map_err(|(dispatch, error)| MaintenanceFailure {
-                session: None,
-                dispatch,
-                error,
-            })?;
+    /// Drive only explicitly configured maintenance. Responses still leave through
+    /// receive_step with their original headers, body and authentication evidence.
+    pub fn keepalive_step(&mut self) -> Result<Option<KeepaliveEvent>, KeepaliveFailure> {
         let mut state = std::mem::take(&mut self.keepalives);
         let result = state.step(self);
         self.keepalives = state;
@@ -202,17 +190,22 @@ impl State {
         if !complete || message.kind != 2 || message.status < 200 {
             return;
         }
-        // A 401 answered by sending the keepalive again: its response is the
-        // one that counts.
-        if let Some(sequence) = message
-            .authentication
-            .as_ref()
-            .and_then(|authentication| authentication.answered_by)
-        {
-            if let Some(pending) = self.pending.as_mut() {
-                pending.dispatch.sequence = sequence;
+        // An ordinary request can advance the same selected Digest context.
+        // Follow that verified continuation for every declared cycle using it.
+        if (200..300).contains(&message.status) {
+            if let Some((previous, next)) = message
+                .authentication
+                .as_ref()
+                .and_then(|a| a.verified_continuation.as_ref())
+            {
+                for schedule in self.schedules.values_mut() {
+                    if let Some(authentication) = schedule.options.authentication.as_mut() {
+                        if authentication.challenge == *previous {
+                            authentication.challenge.clone_from(next);
+                        }
+                    }
+                }
             }
-            return;
         }
         let Some(pending) = self.pending.take() else {
             return;
@@ -236,7 +229,7 @@ impl State {
             },
         });
     }
-    fn step(&mut self, native: &mut Rtsp) -> Result<Option<KeepaliveEvent>, MaintenanceFailure> {
+    fn step(&mut self, native: &mut Rtsp) -> Result<Option<KeepaliveEvent>, KeepaliveFailure> {
         if let Some(event) = self.event.take() {
             return Ok(Some(event));
         }
@@ -268,8 +261,8 @@ impl State {
                 if let Some(schedule) = self.schedules.get(&pending.session) {
                     schedule.cancel.cancel();
                 }
-                return Err(MaintenanceFailure {
-                    session: Some(pending.session),
+                return Err(KeepaliveFailure {
+                    session: pending.session,
                     dispatch: pending.dispatch,
                     error,
                 });
@@ -280,7 +273,7 @@ impl State {
         // A cancelled declaration never starts another request. Retire it only
         // after its already-dispatched response has been observed or timed out.
         self.schedules.retain(|_, value| !value.cancel.cancelled());
-        if unsafe { crate::ffi::gst_runtime_rtsp_request_ready(native.inner.0.as_ptr()) } == 0 {
+        if unsafe { gst_runtime_rtsp_request_ready(native.inner.0.as_ptr()) } == 0 {
             return Ok(None);
         }
         let now = Instant::now();
@@ -313,12 +306,22 @@ impl State {
             }));
         };
         let headers = [("Session", session.as_str())];
-        let (result, dispatch) = native.request_begin(
-            schedule.options.method.name(),
-            &schedule.options.uri,
-            &headers,
-            &[],
-        );
+        let (result, dispatch) = match &schedule.options.authentication {
+            Some(auth) => native.request_authenticated_begin(
+                schedule.options.method.name(),
+                &schedule.options.uri,
+                &headers,
+                &[],
+                &auth.challenge,
+                auth.qop,
+            ),
+            None => native.request_begin(
+                schedule.options.method.name(),
+                &schedule.options.uri,
+                &headers,
+                &[],
+            ),
+        };
         match result {
             Ok(true) => {
                 self.pending = Some(Pending {
@@ -334,8 +337,8 @@ impl State {
                 schedule.cancel.cancel();
                 if dispatch.may_have_been_sent {
                     unsafe { crate::ffi::gst_runtime_rtsp_invalidate(native.inner.0.as_ptr()) };
-                    Err(MaintenanceFailure {
-                        session: Some(session),
+                    Err(KeepaliveFailure {
+                        session,
                         dispatch,
                         error,
                     })

@@ -5,6 +5,7 @@ mod ffi;
 pub mod payload;
 pub mod rtp;
 pub mod rtsp;
+pub mod rtsp_auth;
 pub mod sdp;
 pub mod srtp;
 use std::sync::Once;
