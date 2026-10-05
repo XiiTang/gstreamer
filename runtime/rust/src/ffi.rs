@@ -67,6 +67,7 @@ unsafe extern "C" {
         control_response_age_us: *mut u64,
     ) -> c_int;
     pub fn gst_runtime_rtsp_invalidate(client: *mut c_void);
+    pub fn gst_runtime_rtsp_request_ready(client: *mut c_void) -> i32;
     pub fn gst_runtime_initialize();
     pub fn gst_runtime_rtsp_request_begin(
         client: *mut c_void,

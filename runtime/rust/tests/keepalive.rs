@@ -1,7 +1,7 @@
 #![cfg(unix)]
 use boundless_media::{
     Error,
-    rtsp::{Keepalive, KeepaliveEventKind, KeepaliveFailure, KeepaliveMethod, Rtsp, Version},
+    rtsp::{Keepalive, KeepaliveEventKind, KeepaliveMethod, MaintenanceFailure, Rtsp, Version},
 };
 use std::{
     io::{Read, Write},
@@ -126,17 +126,16 @@ fn configuration(method: KeepaliveMethod) -> Keepalive {
         method,
         interval: Duration::from_millis(10),
         response_timeout: Duration::from_millis(150),
-        authentication: None,
     }
 }
 fn pump(
     native: &mut Rtsp,
     duration: Duration,
-) -> Result<Vec<KeepaliveEventKind>, KeepaliveFailure> {
+) -> Result<Vec<KeepaliveEventKind>, MaintenanceFailure> {
     let until = Instant::now() + duration;
     let mut events = Vec::new();
     while Instant::now() < until {
-        if let Some(event) = native.keepalive_step()? {
+        if let Some(event) = native.maintain()? {
             events.push(event.kind);
         }
         native.receive_step().0.unwrap();
@@ -163,7 +162,7 @@ fn both_versions_keepalive_is_explicit_cancellable_and_uses_the_same_session() {
             let until = Instant::now() + Duration::from_secs(1);
             let mut sent = false;
             loop {
-                if let Some(event) = native.keepalive_step().unwrap() {
+                if let Some(event) = native.maintain().unwrap() {
                     assert_eq!(event.session, "s");
                     match event.kind {
                         KeepaliveEventKind::Sent => sent = true,
@@ -188,7 +187,7 @@ fn both_versions_keepalive_is_explicit_cancellable_and_uses_the_same_session() {
             cancel.cancel();
             pump(&mut native, Duration::from_millis(35)).unwrap();
             assert!(peer.requests.try_recv().is_err());
-            assert!(!native.keepalive_pending());
+            assert!(!native.maintenance_pending());
             assert!(native.keepalive_status("s").is_none());
             drop(native);
             drop(peer);
@@ -239,7 +238,7 @@ fn cancelling_an_inflight_cycle_retains_its_response_deadline_and_unknown_outcom
         .unwrap();
     let until = Instant::now() + Duration::from_secs(1);
     loop {
-        match native.keepalive_step() {
+        match native.maintain() {
             Ok(Some(event)) if matches!(event.kind, KeepaliveEventKind::Sent) => cancel.cancel(),
             Ok(_) => {
                 native.receive_step().0.unwrap();
@@ -293,19 +292,18 @@ fn maintenance_waits_for_explicit_control_and_stops_after_teardown() {
         .unwrap();
     // The native request matcher is occupied; maintenance cannot inject a request.
     thread::sleep(Duration::from_millis(15));
-    assert!(native.keepalive_step().unwrap().is_none());
+    assert!(native.maintain().unwrap().is_none());
     receive(&mut native);
-    let event = native.keepalive_step().unwrap().unwrap();
+    let event = native.maintain().unwrap().unwrap();
     assert!(matches!(event.kind, KeepaliveEventKind::SessionEnded));
     assert_eq!(peer.requests.try_iter().count(), 1);
 }
 
+/// Keepalives carry the connection's Digest answer from the start, counting
+/// the adopted nonce, and a 401 to one is answered by sending it again.
 #[test]
-fn declared_digest_cycle_follows_only_verified_nonce_continuation() {
-    use boundless_media::{
-        rtsp::KeepaliveAuthentication,
-        rtsp_auth::{Algorithm, Policy, Qop},
-    };
+fn keepalives_answer_with_the_connections_digest_session() {
+    use boundless_media::rtsp::Credential;
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
     use zeroize::Zeroizing;
@@ -320,152 +318,127 @@ fn declared_digest_cycle_follows_only_verified_nonce_continuation() {
     }
     let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
     for (version, wire) in [(Version::V1, "1.0"), (Version::V2, "2.0")] {
-        for (qop, qop_wire) in [(Qop::Auth, "auth"), (Qop::AuthInt, "auth-int")] {
-            let (client, mut server) = UnixStream::pair().unwrap();
-            server
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
-            let mut native = Rtsp::from_stream(client.into(), URI, version, 4096).unwrap();
-            native
-                .configure_authentication(
-                    Zeroizing::new("user".into()),
-                    Zeroizing::new("frozen-password".into()),
-                    Policy {
-                        basic: false,
-                        algorithms: vec![Algorithm::Sha256],
-                        qops: vec![qop],
-                        realm: Some("camera".into()),
-                        require_server_proof: true,
-                    },
-                    false,
-                )
-                .unwrap();
-            native
-                .request(
-                    "SETUP",
-                    URI,
-                    &[("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")],
-                    &[],
-                    Duration::from_secs(1),
-                )
-                .0
-                .unwrap();
-            request(&mut server);
-            server.write_all(format!("RTSP/{wire} 200 OK\r\nCSeq: 1\r\nSession: s\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n").as_bytes()).unwrap();
-            receive(&mut native);
-            native
-                .request("OPTIONS", URI, &[], &[], Duration::from_secs(1))
-                .0
-                .unwrap();
-            request(&mut server);
-            server.write_all(format!("RTSP/{wire} 401 Unauthorized\r\nCSeq: 2\r\nWWW-Authenticate: Digest realm=\"camera\",nonce=\"nonce-one\",algorithm=SHA-256,qop=\"{qop_wire}\"\r\n\r\n").as_bytes()).unwrap();
-            let (result, challenge) = native.receive(Duration::from_secs(1));
-            result.unwrap();
-            let challenge = challenge.authentication.unwrap().challenges.remove(0).id;
-            let mut options = configuration(KeepaliveMethod::GetParameter);
-            options.authentication = Some(KeepaliveAuthentication { challenge, qop });
-            native.configure_keepalive("s", Some(options)).unwrap();
-            let mut selected = String::new();
-            for (sequence, nonce) in [
-                (3, "nonce-one"),
-                (4, "nonce-two"),
-                (5, "nonce-three"),
-                (6, "nonce-three"),
-            ] {
-                if sequence == 4 {
-                    assert!(
-                        native
-                            .request_authenticated_begin(
-                                "GET_PARAMETER",
-                                URI,
-                                &[("Session", "s")],
-                                &[],
-                                &selected,
-                                qop
-                            )
-                            .0
-                            .unwrap()
-                    );
-                    assert!(native.write_step().0.unwrap());
-                } else {
-                    let deadline = Instant::now() + Duration::from_secs(1);
-                    loop {
-                        if let Some(event) = native.keepalive_step().unwrap() {
-                            if matches!(event.kind, KeepaliveEventKind::Sent) {
-                                break;
-                            }
-                        }
-                        assert!(Instant::now() < deadline);
-                        thread::sleep(Duration::from_millis(1));
-                    }
-                }
-                let sent = request(&mut server);
-                assert!(sent.starts_with("GET_PARAMETER "));
-                let header = sent
-                    .lines()
-                    .find_map(|l| l.strip_prefix("Authorization: Digest "))
-                    .unwrap();
-                let fields: BTreeMap<_, _> = header
-                    .split(',')
-                    .map(|field| {
-                        let (key, value) = field.trim().split_once('=').unwrap();
-                        (key, value.trim_matches('"'))
-                    })
-                    .collect();
-                assert_eq!(fields["nonce"], nonce);
-                assert_eq!(fields["qop"], qop_wire);
-                assert_eq!(
-                    fields["nc"],
-                    if sequence == 6 {
-                        "00000002"
-                    } else {
-                        "00000001"
-                    }
-                );
-                let ha1 = hash(b"user:camera:frozen-password");
-                let body_hash = if qop == Qop::AuthInt {
-                    format!(":{}", hash(b""))
-                } else {
-                    String::new()
-                };
-                let digest = |a2: &str| {
-                    hash(
-                        format!(
-                            "{ha1}:{nonce}:{}:{}:{qop_wire}:{}",
-                            fields["nc"],
-                            fields["cnonce"],
-                            hash(a2.as_bytes())
-                        )
-                        .as_bytes(),
+        let (client, mut server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut native = Rtsp::from_stream(client.into(), URI, version, 4096).unwrap();
+        native
+            .configure_authentication(
+                Credential::Digest {
+                    username: Zeroizing::new("user".into()),
+                    password: Zeroizing::new("frozen-password".into()),
+                },
+                false,
+            )
+            .unwrap();
+        native
+            .request(
+                "SETUP",
+                URI,
+                &[("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")],
+                &[],
+                Duration::from_secs(1),
+            )
+            .0
+            .unwrap();
+        assert!(!request(&mut server).contains("Authorization"));
+        server.write_all(format!("RTSP/{wire} 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Digest realm=\"camera\",nonce=\"nonce-one\",algorithm=SHA-256,qop=\"auth\"\r\n\r\n").as_bytes()).unwrap();
+        let (result, challenged) = native.receive(Duration::from_secs(1));
+        result.unwrap();
+        assert_eq!(challenged.status, 401);
+        assert_eq!(challenged.authentication.unwrap().answered_by, Some(2));
+        // What the server receives, checked as the server checks it.
+        let answered = |server: &mut UnixStream, nonce: &str, nc: &str| {
+            let sent = request(server);
+            let header = sent
+                .lines()
+                .find_map(|l| l.strip_prefix("Authorization: Digest "))
+                .unwrap()
+                .to_owned();
+            let fields: BTreeMap<_, _> = header
+                .split(',')
+                .map(|field| {
+                    let (key, value) = field.trim().split_once('=').unwrap();
+                    (key.to_owned(), value.trim_matches('"').to_owned())
+                })
+                .collect();
+            assert_eq!(fields["nonce"], nonce);
+            assert_eq!(fields["nc"], nc);
+            assert_eq!(fields["qop"], "auth");
+            let method = sent.split(' ').next().unwrap();
+            let response = |a2: &str| {
+                hash(
+                    format!(
+                        "{}:{nonce}:{nc}:{}:auth:{}",
+                        hash(b"user:camera:frozen-password"),
+                        fields["cnonce"],
+                        hash(a2.as_bytes())
                     )
-                };
-                assert_eq!(
-                    fields["response"],
-                    digest(&format!("GET_PARAMETER:{URI}{body_hash}"))
-                );
-                if sequence == 6 {
-                    // A fresh challenge is visible, but never silently selected by maintenance.
-                    server.write_all(format!("RTSP/{wire} 401 Unauthorized\r\nCSeq: {sequence}\r\nWWW-Authenticate: Digest realm=\"camera\",nonce=\"nonce-four\",algorithm=SHA-256,qop=\"{qop_wire}\"\r\n\r\n").as_bytes()).unwrap();
-                } else {
-                    let next = match sequence {
-                        3 => ", nextnonce=\"nonce-two\"",
-                        4 => ", nextnonce=\"nonce-three\"",
-                        _ => "",
-                    };
-                    server.write_all(format!("RTSP/{wire} 200 OK\r\nCSeq: {sequence}\r\nAuthentication-Info: rspauth=\"{}\", qop={qop_wire}, cnonce=\"{}\", nc={}{next}\r\n\r\n",digest(&format!(":{URI}{body_hash}")),fields["cnonce"],fields["nc"]).as_bytes()).unwrap();
+                    .as_bytes(),
+                )
+            };
+            assert_eq!(fields["response"], response(&format!("{method}:{URI}")));
+            let sequence = sent
+                .lines()
+                .find_map(|l| l.strip_prefix("CSeq: "))
+                .unwrap()
+                .to_owned();
+            let rspauth = response(&format!(":{URI}"));
+            (sent, sequence, rspauth, fields["cnonce"].clone())
+        };
+        let (sent, sequence, rspauth, cnonce) = answered(&mut server, "nonce-one", "00000001");
+        assert!(sent.starts_with("SETUP "));
+        assert_eq!(sequence, "2");
+        server.write_all(format!("RTSP/{wire} 200 OK\r\nCSeq: 2\r\nSession: s\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\nAuthentication-Info: rspauth=\"{rspauth}\", qop=auth, cnonce=\"{cnonce}\", nc=00000001, nextnonce=\"nonce-two\"\r\n\r\n").as_bytes()).unwrap();
+        let reply = receive(&mut native);
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.authentication.unwrap().server_proof, Some(true));
+        native
+            .configure_keepalive("s", Some(configuration(KeepaliveMethod::GetParameter)))
+            .unwrap();
+        let mut statuses = Vec::new();
+        for (nonce, nc, reply) in [
+            ("nonce-two", "00000001", "200 OK"),
+            ("nonce-two", "00000002", "401 Unauthorized"),
+            ("nonce-three", "00000001", "200 OK"),
+        ] {
+            // A cycle is due and written; the keepalive sent again after its
+            // 401 is written by the same steps.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                let event = native.maintain().unwrap();
+                if matches!(event.map(|e| e.kind), Some(KeepaliveEventKind::Sent))
+                    || (statuses.last() == Some(&401) && !native.maintenance_writing())
+                {
+                    break;
                 }
-                let reply = receive(&mut native);
-                if let Some(challenge) = reply.authentication.and_then(|mut a| a.challenges.pop()) {
-                    selected = challenge.id;
-                }
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
             }
-            assert!(!native.keepalive_status("s").unwrap().enabled);
-            pump(&mut native, Duration::from_millis(30)).unwrap();
-            server.set_nonblocking(true).unwrap();
-            assert_eq!(
-                server.read(&mut [0]).unwrap_err().kind(),
-                std::io::ErrorKind::WouldBlock
-            );
+            let (sent, sequence, _, _) = answered(&mut server, nonce, nc);
+            assert!(sent.starts_with("GET_PARAMETER "));
+            assert!(sent.contains("Session: s\r\n"));
+            if reply.starts_with("401") {
+                server.write_all(format!("RTSP/{wire} 401 Unauthorized\r\nCSeq: {sequence}\r\nWWW-Authenticate: Digest realm=\"camera\",nonce=\"nonce-three\",stale=true,algorithm=SHA-256,qop=\"auth\"\r\n\r\n").as_bytes()).unwrap();
+            } else {
+                server
+                    .write_all(
+                        format!("RTSP/{wire} {reply}\r\nCSeq: {sequence}\r\nSession: s\r\n\r\n")
+                            .as_bytes(),
+                    )
+                    .unwrap();
+            }
+            let message = receive(&mut native);
+            statuses.push(message.status);
+            if let Some(event) = native.maintain().unwrap() {
+                assert!(matches!(
+                    event.kind,
+                    KeepaliveEventKind::Response { status: 200 }
+                ));
+            }
         }
+        assert_eq!(statuses, [200, 401, 200]);
+        assert!(native.keepalive_status("s").unwrap().enabled);
     }
 }
