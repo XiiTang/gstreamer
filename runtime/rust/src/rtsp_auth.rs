@@ -211,8 +211,12 @@ impl Auth {
                             BasicClient::try_from(&challenge).map_err(|_| Error::AUTHENTICATION)?,
                         )
                     } else if challenge.scheme.eq_ignore_ascii_case("Digest") {
-                        let client = DigestClient::try_from(&challenge)
-                            .map_err(|_| Error::AUTHENTICATION)?;
+                        // RFC 7616 section 3.7: a challenge this client cannot
+                        // read, such as one naming an unknown algorithm, is
+                        // passed over for the others.
+                        let Ok(client) = DigestClient::try_from(&challenge) else {
+                            continue;
+                        };
                         if !self
                             .policy
                             .algorithms

@@ -496,3 +496,27 @@ fn digest_info_without_qop_proves_nothing_and_its_lines_are_one_list() {
         assert_eq!(observed.challenges.len(), 1);
     }
 }
+
+/// RFC 7616 section 3.7: a Digest challenge naming an algorithm this client
+/// does not know is passed over, and the one after it is offered.
+#[test]
+fn an_unreadable_digest_challenge_is_passed_over_for_the_next() {
+    let (stream, mut server) = UnixStream::pair().unwrap();
+    server.set_read_timeout(Some(SECOND)).unwrap();
+    let mut client = Rtsp::from_stream(stream.into(), URI, Version::V1, 4096).unwrap();
+    client
+        .configure_authentication(
+            "user".to_owned().into(),
+            "private-password".to_owned().into(),
+            auth_policy(),
+            false,
+        )
+        .unwrap();
+    client.request("OPTIONS", URI, &[], &[], SECOND).0.unwrap();
+    request(&mut server);
+    server.write_all(b"RTSP/1.0 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Digest realm=\"camera\", nonce=\"n1\", algorithm=SHA-999, qop=\"auth\"\r\nWWW-Authenticate: Digest realm=\"camera\", nonce=\"n2\", algorithm=SHA-256, qop=\"auth\"\r\n\r\n").unwrap();
+    let (result, message) = client.receive(SECOND);
+    result.unwrap();
+    let challenges = message.authentication.unwrap().challenges;
+    assert_eq!(challenges.len(), 1, "{challenges:?}");
+}
