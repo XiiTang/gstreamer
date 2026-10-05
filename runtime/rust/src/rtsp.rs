@@ -1,8 +1,10 @@
+mod authentication;
 mod keepalive;
 use crate::{Error, ffi, initialize};
+pub use authentication::{Credential, Observation};
 pub use keepalive::{
-    Keepalive, KeepaliveAuthentication, KeepaliveCancellation, KeepaliveEvent, KeepaliveEventKind,
-    KeepaliveFailure, KeepaliveMethod, KeepaliveStatus,
+    Keepalive, KeepaliveCancellation, KeepaliveEvent, KeepaliveEventKind, KeepaliveMethod,
+    KeepaliveStatus, MaintenanceFailure,
 };
 use std::{
     cell::Cell,
@@ -44,7 +46,7 @@ pub struct Message {
     pub headers: Vec<(Vec<u8>, Vec<u8>)>,
     pub body: Vec<u8>,
     pub raw: Vec<u8>,
-    pub authentication: Option<crate::rtsp_auth::Observation>,
+    pub authentication: Option<Observation>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Address {
@@ -92,7 +94,7 @@ impl Drop for Inner {
 pub struct Rtsp {
     inner: Arc<Inner>,
     version: Version,
-    authentication: Option<crate::rtsp_auth::Auth>,
+    authentication: Option<authentication::Authentication>,
     keepalives: keepalive::State,
     _exclusive: PhantomData<Cell<()>>,
 }
@@ -208,85 +210,137 @@ impl Rtsp {
             _exclusive: PhantomData,
         })
     }
+    /// Authenticates every request this owner sends from now on, its
+    /// keepalives included. Basic is refused on RTSP 2.0 without TLS.
     pub fn configure_authentication(
         &mut self,
-        username: Zeroizing<String>,
-        password: Zeroizing<String>,
-        policy: crate::rtsp_auth::Policy,
+        credential: Credential,
         tls: bool,
     ) -> Result<(), Error> {
-        if self.authentication.is_some() {
+        let authentication = authentication::Authentication::new(credential)?;
+        if self.authentication.is_some()
+            || (authentication.is_basic() && !tls && !matches!(self.version, Version::V1))
+        {
             return Err(Error::AUTHENTICATION);
         }
-        self.authentication = Some(crate::rtsp_auth::Auth::new(
-            username,
-            password,
-            policy,
-            tls || matches!(self.version, Version::V1),
-        )?);
+        self.authentication = Some(authentication);
         Ok(())
     }
-    pub fn request_authenticated_begin(
-        &mut self,
-        method: &str,
-        uri: &str,
-        headers: &[(&str, &str)],
-        body: &[u8],
-        challenge: &str,
-        qop: crate::rtsp_auth::Qop,
-    ) -> (Result<bool, Error>, Dispatch) {
-        let prepared = match self
-            .authentication
-            .as_mut()
-            .ok_or(Error::AUTHENTICATION)
-            .and_then(|auth| auth.prepare(challenge, qop, method, uri, body))
-        {
-            Ok(prepared) => prepared,
-            Err(error) => return (Err(error), Dispatch::default()),
-        };
-        let mut headers = headers.to_vec();
-        headers.push(("Authorization", &prepared.header));
-        let result = self.request_begin(method, uri, &headers, body);
-        if matches!(result.0, Ok(true)) {
-            self.authentication.as_mut().unwrap().dispatched(prepared);
-        }
-        result
-    }
-    fn authenticate_received(
-        &mut self,
-        valid: bool,
-        complete: bool,
-        message: &mut Message,
-    ) -> Result<(), Error> {
+    /// Takes a complete response read from the native client: a 401 the
+    /// owner answers names the CSeq its request is sent again as, and that
+    /// request begins as soon as the writer is free; a reply to a Digest
+    /// answer whose proof fails invalidates the client.
+    fn authenticate_received(&mut self, message: &mut Message) -> Result<(), Error> {
         let Some(auth) = self.authentication.as_mut() else {
             return Ok(());
         };
-        if !valid {
-            message.authentication = Some(crate::rtsp_auth::Observation {
-                protected_headers: true,
-                ..Default::default()
-            });
-        } else if complete && message.kind == 2 {
-            match auth.response(message.status, &message.headers, &message.body) {
-                Ok(observation) => message.authentication = Some(observation),
-                Err(error) => {
-                    message.authentication = Some(crate::rtsp_auth::Observation {
-                        protected_headers: true,
-                        server_proof: Some(false),
-                        ..Default::default()
-                    });
-                    unsafe { ffi::gst_runtime_rtsp_invalidate(self.inner.0.as_ptr()) };
-                    return Err(error);
+        if message.kind != 2 || message.status < 200 {
+            return Ok(());
+        }
+        if let Err(error) = auth.received(message) {
+            unsafe { ffi::gst_runtime_rtsp_invalidate(self.inner.0.as_ptr()) };
+            return Err(error);
+        }
+        self.answer().map_err(|(_, error)| error)
+    }
+    /// Begins the request due again once the writer is free. It must be sent
+    /// as the CSeq its 401 named; a request that fails after it may have been
+    /// sent, or is sent as another, leaves the client invalid.
+    fn answer(&mut self) -> Result<(), (Dispatch, Error)> {
+        // A request still being written leaves the writer occupied.
+        if unsafe { ffi::gst_runtime_rtsp_request_ready(self.inner.0.as_ptr()) } == 0 {
+            return Ok(());
+        }
+        let Some(due) = self
+            .authentication
+            .as_mut()
+            .and_then(|auth| auth.take_due())
+        else {
+            return Ok(());
+        };
+        let (request, sequence) = due.map_err(|error| (Dispatch::default(), error))?;
+        let sent = request.kept().expect("a due request is kept");
+        let (result, dispatch) =
+            self.begin(&sent.method, &sent.uri, &request.headers(), &sent.body);
+        let inner = self.inner.0.as_ptr();
+        let auth = self.authentication.as_mut().unwrap();
+        match result {
+            Ok(true) if dispatch.sequence != sequence => {
+                unsafe { ffi::gst_runtime_rtsp_invalidate(inner) };
+                Err((dispatch, Error::INVALID))
+            }
+            Ok(true) => {
+                auth.dispatched(request, sequence);
+                auth.writing = true;
+                Ok(())
+            }
+            Ok(false) => {
+                auth.keep_due(request, sequence);
+                Ok(())
+            }
+            Err(error) => {
+                if dispatch.may_have_been_sent {
+                    unsafe { ffi::gst_runtime_rtsp_invalidate(inner) };
                 }
+                Err((dispatch, error))
             }
         }
-        Ok(())
+    }
+    /// Begins, then writes one step at a time, the request sent again with
+    /// an answer.
+    pub(super) fn answer_step(&mut self) -> Result<(), (Dispatch, Error)> {
+        if !self
+            .authentication
+            .as_ref()
+            .is_some_and(|auth| auth.writing)
+        {
+            return self.answer();
+        }
+        let (result, dispatch) = self.write_step();
+        match result {
+            Ok(true) => {
+                self.authentication.as_mut().unwrap().writing = false;
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(error) => {
+                unsafe { ffi::gst_runtime_rtsp_invalidate(self.inner.0.as_ptr()) };
+                Err((dispatch, error))
+            }
+        }
     }
     pub fn cancellation(&self) -> Cancellation {
         Cancellation(self.inner.clone())
     }
     /// False means the single native writer is occupied; no admission occurred.
+    /// A configured credential authenticates the request.
     pub fn request_begin(
+        &mut self,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> (Result<bool, Error>, Dispatch) {
+        let Some(auth) = self.authentication.as_mut() else {
+            return self.begin(method, uri, headers, body);
+        };
+        if auth.busy() {
+            return (Ok(false), Dispatch::default());
+        }
+        let request = match auth.request(method, uri, headers, body) {
+            Ok(request) => request,
+            Err(error) => return (Err(error), Dispatch::default()),
+        };
+        let result = self.begin(method, uri, &request.headers(), body);
+        if matches!(result.0, Ok(true)) {
+            self.authentication
+                .as_mut()
+                .unwrap()
+                .dispatched(request, result.1.sequence);
+        }
+        result
+    }
+    fn begin(
         &mut self,
         method: &str,
         uri: &str,
@@ -383,6 +437,9 @@ impl Rtsp {
             Error::check(code).map(|_| true)
         }
     }
+    /// Sends one request within `limit`, as `request_begin` and then
+    /// `write_step` until it is written; a request that does not finish in
+    /// time leaves the client invalid, as its dispatch is uncertain.
     pub fn request(
         &mut self,
         method: &str,
@@ -391,30 +448,32 @@ impl Rtsp {
         body: &[u8],
         limit: Duration,
     ) -> (Result<(), Error>, Dispatch) {
-        let mut dispatch = Dispatch::default();
-        let result = (|| {
-            let method = text(method)?;
-            let uri = text(uri)?;
-            let headers = Headers::new(headers)?;
-            let mut native_dispatch = 0;
-            let code = unsafe {
-                ffi::gst_runtime_rtsp_request(
-                    self.inner.0.as_ptr(),
-                    method.as_ptr(),
-                    uri.as_ptr(),
-                    headers.values.as_ptr(),
-                    headers.values.len(),
-                    body.as_ptr(),
-                    body.len(),
-                    timeout(limit),
-                    &mut dispatch.sequence,
-                    &mut native_dispatch,
-                )
+        let end = std::time::Instant::now() + limit;
+        let (result, mut dispatch) = self.request_begin(method, uri, headers, body);
+        match result {
+            Ok(true) => {}
+            Ok(false) => return (Err(Error::INVALID), dispatch),
+            Err(error) => return (Err(error), dispatch),
+        }
+        loop {
+            let (result, step) = self.write_step();
+            dispatch.may_have_been_sent |= step.may_have_been_sent;
+            match result {
+                Ok(true) => return (Ok(()), dispatch),
+                Ok(false) => {}
+                Err(error) => return (Err(error), dispatch),
+            }
+            let remaining = end.saturating_duration_since(std::time::Instant::now());
+            let waited = if remaining.is_zero() {
+                Err(Error::TIMEOUT)
+            } else {
+                self.wait(remaining).map(drop)
             };
-            dispatch.may_have_been_sent = native_dispatch != 0;
-            Error::check(code)
-        })();
-        (result, dispatch)
+            if let Err(error) = waited {
+                unsafe { ffi::gst_runtime_rtsp_invalidate(self.inner.0.as_ptr()) };
+                return (Err(error), dispatch);
+            }
+        }
     }
     pub fn respond(
         &mut self,
@@ -448,7 +507,10 @@ impl Rtsp {
             Err(error) => Err(error),
         }
     }
+    /// Reads one message within `limit`. A 401 this owner answers comes with
+    /// the request sent again already written.
     pub fn receive(&mut self, limit: Duration) -> (Result<(), Error>, Message) {
+        let end = std::time::Instant::now() + limit;
         let mut message = std::ptr::null_mut();
         let result = Error::check(unsafe {
             ffi::gst_runtime_rtsp_receive(self.inner.0.as_ptr(), timeout(limit), &mut message)
@@ -456,9 +518,21 @@ impl Rtsp {
         // The native ABI always owns a result message, including failed reads.
         let message = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
         let mut message = message.copy();
-        let result = self
-            .authenticate_received(result.is_ok(), true, &mut message)
-            .and(result);
+        let result = result.and_then(|()| {
+            self.authenticate_received(&mut message)?;
+            // The request sent again is written before this returns.
+            while self.authentication.as_ref().is_some_and(|auth| auth.busy()) {
+                self.answer_step().map_err(|(_, error)| error)?;
+                let remaining = end.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(Error::TIMEOUT);
+                }
+                if self.authentication.as_ref().is_some_and(|auth| auth.busy()) {
+                    self.wait(remaining)?;
+                }
+            }
+            Ok(())
+        });
         self.keepalives.observe(result.is_ok(), &message);
         (result, message)
     }
@@ -467,8 +541,12 @@ impl Rtsp {
     /// Native control request may have been sent and has no correlated response.
     pub fn pending_dispatch(&self) -> Option<u32> {
         let mut sequence = 0;
-        (unsafe { ffi::gst_runtime_rtsp_pending_dispatch(self.inner.0.as_ptr(), &mut sequence) } != 0).then_some(sequence)
+        (unsafe { ffi::gst_runtime_rtsp_pending_dispatch(self.inner.0.as_ptr(), &mut sequence) }
+            != 0)
+            .then_some(sequence)
     }
+    /// One step of reading. A 401 this owner answers names the CSeq its
+    /// request is sent again as; `maintain` writes that request.
     pub fn receive_step(&mut self) -> (Result<bool, Error>, Message) {
         let mut message = std::ptr::null_mut();
         let code =
@@ -480,9 +558,10 @@ impl Rtsp {
         };
         let message = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
         let mut message = message.copy();
-        let result = self
-            .authenticate_received(result.is_ok(), matches!(result, Ok(true)), &mut message)
-            .and(result);
+        let result = match result {
+            Ok(true) => self.authenticate_received(&mut message).map(|()| true),
+            other => other,
+        };
         self.keepalives
             .observe(matches!(result, Ok(true)), &message);
         (result, message)

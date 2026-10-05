@@ -115,23 +115,48 @@ the inherited control/direction and Opus hint interpretation respectively.
 
 Explicit periodic RTSP maintenance is owned by the Rust native adapter on the
 same serialized client. Configure one OPTIONS or GET_PARAMETER cycle per session,
-with a positive interval, write/response deadline, URI and optional already chosen
-authentication challenge. The adapter does not derive an interval from the remote
-Session timeout. The host polls `keepalive_step` and `receive_step`, defers other
-requests while a maintenance request is outstanding, and continues reading media
-and server requests. A negative response or unavailable authentication challenge
-ends that cycle without retry/fallback. Original responses still use the ordinary
-message path. A partial-write/response timeout preserves dispatch uncertainty and
-cancels the control owner. The cancellation handle stops future cycles while an
-already dispatched request retains its deadline; this also covers an abandoned
-configuration handoff. Local timer passage never asserts remote session expiry.
-An already selected Digest cycle follows verified `Authentication-Info` nonce
-continuation within that same context, preserving qop and frozen identity. A new
-401 challenge still stops the cycle and requires an explicit selection. Native
-tests independently verify SHA-256 request and response proofs, nonce-count reset
-and subsequent increment for both RTSP versions and auth/auth-int.
-Verified nonce changes from ordinary explicit requests also advance declared
-cycles selecting that same context; unrelated challenge selections are untouched.
+with a positive interval, write/response deadline and URI. The adapter does not
+derive an interval from the remote Session timeout. The host polls `maintain`
+and `receive_step`, defers its own requests while `maintenance_pending` and its
+other writes while `maintenance_writing`, and continues reading media and server
+requests. A negative response ends that cycle without retry/fallback. Original
+responses still use the ordinary message path. A partial-write/response timeout
+preserves dispatch uncertainty and cancels the control owner. The cancellation
+handle stops future cycles while an already dispatched request retains its
+deadline; this also covers an abandoned configuration handoff. Local timer
+passage never asserts remote session expiry.
+
+## RTSP authentication (2026-10-06)
+
+A connection configured with a credential authenticates every request the
+adapter sends for it, keepalives included; the native client itself still never
+retries. Basic is sent with every request, and on RTSP 2.0 only over TLS
+(RFC 7826 section 19.1). Digest uses http-auth's `DigestSession`, which
+Boundless's HTTP and proxy answers use too: a 401 offering a challenge is
+answered once by sending the request again. CSeq advances only as a request is
+sent and nothing else is sent before that one, so the 401 is delivered at once
+naming the CSeq it goes out as, also when interleaved data still occupies the
+writer; the request goes out as that CSeq or the client is invalidated. The
+connection's later requests answer from the start with the adopted nonce,
+counted, until the server challenges again or proves a `nextnonce`. `auth` is
+answered where offered, `auth-int` where it is all that is offered, since the
+adapter holds whole bodies. A reply whose proof does not verify invalidates the
+client; a reply with none is taken at its word. Only a Digest connection keeps a
+copy of the request in flight. The caller chooses no challenge, algorithm or qop
+and cannot set `Authorization`. `request` is `request_begin` and `write_step`, so
+one path authenticates; `receive` keeps the native read, whose cancellation
+returns the raw bytes so far, and writes a request sent again before it returns.
+Before this, the caller selected each answer explicitly and repeated
+http-auth's choice of challenge and proof check here, so each fix to either
+landed twice.
+
+`tests/rtsp.rs` checks both versions' automatic answer with the request and
+reply proofs recomputed independently with SHA-256, an unreadable challenge
+passed over, the count across requests, one answer per request, a 401 read
+while data occupies the writer, a failing proof, an unproven `nextnonce` not
+adopted and a proven one adopted, and Basic only over TLS on RTSP 2.0;
+`tests/keepalive.rs` checks keepalives answering from the start and a stale 401
+to one answered with the new nonce.
 
 ## H264/H265 dropped RTP extensions (2026-10-02)
 

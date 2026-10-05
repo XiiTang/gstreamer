@@ -67,6 +67,7 @@ unsafe extern "C" {
         control_response_age_us: *mut u64,
     ) -> c_int;
     pub fn gst_runtime_rtsp_invalidate(client: *mut c_void);
+    pub fn gst_runtime_rtsp_request_ready(client: *mut c_void) -> i32;
     pub fn gst_runtime_initialize();
     pub fn gst_runtime_rtsp_request_begin(
         client: *mut c_void,
@@ -112,18 +113,6 @@ unsafe extern "C" {
         limit: u32,
         out: *mut *mut c_void,
         taken: *mut c_int,
-    ) -> c_int;
-    pub fn gst_runtime_rtsp_request(
-        client: *mut c_void,
-        method: *const c_char,
-        uri: *const c_char,
-        headers: *const Header,
-        count: usize,
-        body: *const u8,
-        length: usize,
-        timeout: i64,
-        sequence: *mut u32,
-        dispatch: *mut c_int,
     ) -> c_int;
     pub fn gst_runtime_rtsp_respond(
         client: *mut c_void,
