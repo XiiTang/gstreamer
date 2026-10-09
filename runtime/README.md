@@ -126,6 +126,26 @@ handle stops future cycles while an already dispatched request retains its
 deadline; this also covers an abandoned configuration handoff. Local timer
 passage never asserts remote session expiry.
 
+## Typed RTP session statistics (2026-10-10)
+
+`gst_runtime_rtp_session_statistics` walks the session's statistics structure
+in its own field order and hands each value to a visitor with the GType it
+holds: 32- and 64-bit signed and unsigned integers, doubles, booleans and
+strings, a nested structure (each source's statistics) or list (`source-stats`,
+`received-rr`) opening a level its END closes. A value of any other type fails
+the walk rather than being dropped or written as text. It replaces
+`gst_runtime_rtp_session_stats`, which returned `gst_structure_to_string`'s
+text, so a caller parsed GStreamer's serialization to read a counter; Boundless
+answers named fields, and `rust::rtp::Session::statistics` now returns the
+structure as `Statistics`.
+
+`tests/rtp_session.c` checks the receiver's three packets from SSRC 7 as a
+`UINT64` `packets-received` inside that source's structure, the outer
+structure's name, balanced nesting, every kind the session holds, and a
+visitor stopping the walk; `tests/rtp_feedback.c` reads `rtx-sent` as a
+`UINT` at least the repairs observed; the crate's `rtp` tests read a sender's
+`packets-sent` as `Uint64` and `received-rr` as a list.
+
 ## RTSP authentication (2026-10-06)
 
 A connection configured with a credential authenticates every request the

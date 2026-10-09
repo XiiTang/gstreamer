@@ -90,6 +90,118 @@ pub(crate) struct Settings {
     bandwidth_bps: f64,
     negotiated_caps: *const c_void,
 }
+/// A value of the native session statistics, as the GType it holds names it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Statistic {
+    Int(i32),
+    Uint(u32),
+    Int64(i64),
+    Uint64(u64),
+    Double(f64),
+    Boolean(bool),
+    String(String),
+    Structure(Statistics),
+    List(Vec<Statistic>),
+}
+/// A native statistics structure: its name, and its fields named as GStreamer
+/// names them, in the structure's order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Statistics {
+    pub name: String,
+    pub fields: Vec<(String, Statistic)>,
+}
+impl Statistics {
+    pub fn get(&self, name: &str) -> Option<&Statistic> {
+        self.fields
+            .iter()
+            .find_map(|(field, value)| (field == name).then_some(value))
+    }
+}
+#[repr(C)]
+struct RawStatistic {
+    kind: u32,
+    name: *const c_char,
+    integer: i64,
+    unsigned_integer: u64,
+    number: f64,
+    boolean: i32,
+    text: *const c_char,
+}
+/// Assembles the native walk's open/value/end sequence into one tree.
+#[derive(Default)]
+struct StatisticsBuilder {
+    open: Vec<(Option<String>, Statistic)>,
+    done: Option<Statistics>,
+    invalid: bool,
+}
+impl StatisticsBuilder {
+    fn text(pointer: *const c_char) -> Option<String> {
+        if pointer.is_null() {
+            return None;
+        }
+        let text = unsafe { CStr::from_ptr(pointer) }.to_str().ok()?;
+        Some(text.to_owned())
+    }
+    fn add(&mut self, raw: &RawStatistic) -> Option<()> {
+        let name = match raw.name.is_null() {
+            true => None,
+            false => Some(Self::text(raw.name)?),
+        };
+        let value = match raw.kind {
+            0 => Statistic::Int(i32::try_from(raw.integer).ok()?),
+            1 => Statistic::Uint(u32::try_from(raw.unsigned_integer).ok()?),
+            2 => Statistic::Int64(raw.integer),
+            3 => Statistic::Uint64(raw.unsigned_integer),
+            4 => Statistic::Double(raw.number),
+            5 => Statistic::Boolean(raw.boolean != 0),
+            6 => Statistic::String(Self::text(raw.text)?),
+            7 => {
+                let structure = Statistics {
+                    name: Self::text(raw.text)?,
+                    fields: Vec::new(),
+                };
+                self.open.push((name, Statistic::Structure(structure)));
+                return Some(());
+            }
+            8 => {
+                self.open.push((name, Statistic::List(Vec::new())));
+                return Some(());
+            }
+            9 => {
+                let (name, value) = self.open.pop()?;
+                if self.open.is_empty() {
+                    // The outer structure, which no field names.
+                    let (None, Statistic::Structure(statistics)) = (name, value) else {
+                        return None;
+                    };
+                    return self.done.replace(statistics).is_none().then_some(());
+                }
+                return self.place(name, value);
+            }
+            _ => return None,
+        };
+        self.place(name, value)
+    }
+    /// A field takes its name inside a structure; a list element has none.
+    fn place(&mut self, name: Option<String>, value: Statistic) -> Option<()> {
+        match (self.open.last_mut()?, name) {
+            ((_, Statistic::Structure(structure)), Some(name)) => {
+                structure.fields.push((name, value))
+            }
+            ((_, Statistic::List(list)), None) => list.push(value),
+            _ => return None,
+        }
+        Some(())
+    }
+}
+unsafe extern "C" fn visit_statistic(raw: *const RawStatistic, user_data: *mut c_void) -> i32 {
+    let builder = unsafe { &mut *user_data.cast::<StatisticsBuilder>() };
+    if builder.add(unsafe { &*raw }).is_none() {
+        builder.invalid = true;
+        return 1;
+    }
+    0
+}
 unsafe extern "C" {
     fn gst_runtime_rtp_session_new(settings: *const Settings) -> *mut c_void;
     fn gst_runtime_rtp_session_try_write(
@@ -119,10 +231,13 @@ unsafe extern "C" {
         sequence: u16,
         delay: u64,
     ) -> i32;
-    fn gst_runtime_rtp_session_stats(session: *mut c_void) -> *mut c_char;
+    fn gst_runtime_rtp_session_statistics(
+        session: *mut c_void,
+        visitor: unsafe extern "C" fn(*const RawStatistic, *mut c_void) -> i32,
+        user_data: *mut c_void,
+    ) -> i32;
     fn gst_runtime_rtp_session_stop(session: *mut c_void);
     fn gst_runtime_rtp_session_free(session: *mut c_void);
-    fn gst_runtime_rtp_session_stats_free(memory: *mut c_char);
 }
 struct Inner(NonNull<c_void>);
 // Only cancellation is shared; all data and state entry points require the
@@ -280,16 +395,29 @@ impl Session {
             code => Err(Error(code)),
         }
     }
-    pub fn statistics(&mut self) -> Result<String, Error> {
-        let raw = unsafe { gst_runtime_rtp_session_stats(self.inner.0.as_ptr()) };
-        if raw.is_null() {
-            return Err(Error(-5));
+    /// The native session statistics as typed fields; a value of a type no
+    /// `Statistic` names fails rather than being dropped or written as text.
+    pub fn statistics(&mut self) -> Result<Statistics, Error> {
+        let mut builder = StatisticsBuilder::default();
+        let result = unsafe {
+            gst_runtime_rtp_session_statistics(
+                self.inner.0.as_ptr(),
+                visit_statistic,
+                (&raw mut builder).cast(),
+            )
+        };
+        match (result, builder) {
+            (
+                0,
+                StatisticsBuilder {
+                    done: Some(statistics),
+                    invalid: false,
+                    ..
+                },
+            ) => Ok(statistics),
+            (code, _) if code < 0 => Err(Error(code)),
+            _ => Err(Error(-5)),
         }
-        let value = unsafe { CStr::from_ptr(raw) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe { gst_runtime_rtp_session_stats_free(raw) };
-        Ok(value)
     }
 }
 #[cfg(test)]
@@ -342,7 +470,10 @@ mod tests {
                 })
                 .is_err()
         );
-        assert!(session.statistics().unwrap().contains("rtx-sent"));
+        assert_eq!(
+            session.statistics().unwrap().get("rtx-sent"),
+            Some(&Statistic::Uint(0))
+        );
         assert!(
             Session::new(Configuration {
                 reports: None,
@@ -413,7 +544,36 @@ mod tests {
             }
         }
         assert!(pressure);
-        assert!(s.statistics().unwrap().contains("source-stats"));
+        // The sender's own source counts the packet it sent as a 64-bit field.
+        let statistics = s.statistics().unwrap();
+        assert_eq!(statistics.name, "application/x-rtp-session-stats");
+        assert_eq!(statistics.get("sent-nack-count"), Some(&Statistic::Uint(0)));
+        let Some(Statistic::List(sources)) = statistics.get("source-stats") else {
+            panic!("no source-stats list: {statistics:?}");
+        };
+        let source = sources
+            .iter()
+            .find_map(|source| match source {
+                Statistic::Structure(source) if source.get("ssrc") == Some(&Statistic::Uint(7)) => {
+                    Some(source)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(source.name, "application/x-rtp-source-stats");
+        assert_eq!(source.get("internal"), Some(&Statistic::Boolean(true)));
+        assert!(matches!(
+            source.get("packets-sent"),
+            Some(Statistic::Uint64(1..))
+        ));
+        assert!(matches!(
+            source.get("packets-lost"),
+            Some(Statistic::Int(_))
+        ));
+        assert!(matches!(
+            source.get("received-rr"),
+            Some(Statistic::List(_))
+        ));
         let cancellation = s.cancellation();
         let start = std::time::Instant::now();
         cancellation.cancel();

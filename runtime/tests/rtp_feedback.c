@@ -31,6 +31,14 @@ rtcp_kinds (const guint8 *bytes, gsize length)
   gst_buffer_unref (buffer);
   return kinds;
 }
+/* The RTX sender's count of repair packets, a session-level field. */
+static int
+rtx_sent_statistic (const GstRuntimeStatistic *statistic, gpointer data)
+{
+  if (statistic->kind == GST_RUNTIME_STATISTIC_UINT && !g_strcmp0 (statistic->name, "rtx-sent"))
+    *(guint64 *)data = statistic->unsigned_integer;
+  return 0;
+}
 static gpointer
 feedback_pressure (gpointer owner)
 {
@@ -135,9 +143,9 @@ main (int argc, char **argv)
   g_assert_cmpuint (repaired, >=, 1);
   g_assert_cmpuint (delivered, ==, 3);
   g_assert_cmpuint (feedback, ==, 7);
-  gchar *stats = gst_runtime_rtp_session_stats (a);
-  g_assert_nonnull (strstr (stats, "rtx-sent"));
-  gst_runtime_rtp_session_stats_free (stats);
+  guint64 rtx_sent = 0;
+  g_assert_cmpint (gst_runtime_rtp_session_statistics (a, rtx_sent_statistic, &rtx_sent), ==, 0);
+  g_assert_cmpuint (rtx_sent, >=, repaired);
   GThread *pressure = g_thread_new ("feedback-pressure", feedback_pressure, a);
   g_usleep (50000);
   gint64 stopped = g_get_monotonic_time ();

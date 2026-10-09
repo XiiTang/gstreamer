@@ -53,10 +53,42 @@ gboolean gst_runtime_rtp_session_report (GstRuntimeRtpSession *session, guint64 
 GST_API
 int gst_runtime_rtp_session_feedback (GstRuntimeRtpSession *, guint32 kind, guint32 ssrc,
                                       guint16 sequence, guint64 max_delay);
+/* One value of the native statistics structure, with the GType it holds.
+ * STRUCTURE and LIST open a nesting whose fields or elements follow until its
+ * END. name is the field's name, NULL for the outer structure and for a list
+ * element; text is a STRING's value or a STRUCTURE's name. Pointers are valid
+ * only during the visitor's call. */
+typedef enum
+{
+  GST_RUNTIME_STATISTIC_INT = 0,     /* G_TYPE_INT in integer */
+  GST_RUNTIME_STATISTIC_UINT = 1,    /* G_TYPE_UINT in unsigned_integer */
+  GST_RUNTIME_STATISTIC_INT64 = 2,   /* G_TYPE_INT64 in integer */
+  GST_RUNTIME_STATISTIC_UINT64 = 3,  /* G_TYPE_UINT64 in unsigned_integer */
+  GST_RUNTIME_STATISTIC_DOUBLE = 4,  /* G_TYPE_DOUBLE in number */
+  GST_RUNTIME_STATISTIC_BOOLEAN = 5, /* G_TYPE_BOOLEAN in boolean */
+  GST_RUNTIME_STATISTIC_STRING = 6,
+  GST_RUNTIME_STATISTIC_STRUCTURE = 7,
+  GST_RUNTIME_STATISTIC_LIST = 8, /* GValueArray, GstValueList or GstValueArray */
+  GST_RUNTIME_STATISTIC_END = 9,
+} GstRuntimeStatisticKind;
+typedef struct
+{
+  guint32 kind;
+  const gchar *name;
+  gint64 integer;
+  guint64 unsigned_integer;
+  gdouble number;
+  gboolean boolean;
+  const gchar *text;
+} GstRuntimeStatistic;
+/* Nonzero stops the walk. */
+typedef int (*GstRuntimeStatisticVisitor) (const GstRuntimeStatistic *statistic,
+                                           gpointer user_data);
+/* Walks the native session statistics in field order: 0 walked, 1 the visitor
+ * stopped, negative no statistics or a value of a type no kind names. */
 GST_API
-gchar *gst_runtime_rtp_session_stats (GstRuntimeRtpSession *session);
-GST_API
-void gst_runtime_rtp_session_stats_free (gchar *stats);
+int gst_runtime_rtp_session_statistics (GstRuntimeRtpSession *session,
+                                        GstRuntimeStatisticVisitor visitor, gpointer user_data);
 GST_API
 void gst_runtime_rtp_session_stop (GstRuntimeRtpSession *session);
 GST_API

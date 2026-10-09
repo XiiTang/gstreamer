@@ -1,3 +1,5 @@
+/* rtpsession's statistics hold their sources in a GValueArray. */
+#define GLIB_DISABLE_DEPRECATION_WARNINGS
 #include "gstruntimertpsession.h"
 #include "../subprojects/gst-plugins-good/gst/rtpmanager/rtpsession.h"
 #include <gst/app/gstappsink.h>
@@ -430,15 +432,113 @@ gst_runtime_rtp_session_feedback (GstRuntimeRtpSession *s, guint32 kind, guint32
     return rtp_session_request_nack ((RTPSession *)s->engine, ssrc, sequence, max_delay);
   return rtp_session_request_key_unit ((RTPSession *)s->engine, ssrc, kind == 4, -1);
 }
-gchar *
-gst_runtime_rtp_session_stats (GstRuntimeRtpSession *s)
+static int visit_statistic (const gchar *name, const GValue *value,
+                            GstRuntimeStatisticVisitor visitor, gpointer user_data);
+/* 1 when the visitor stops the walk. */
+static int
+emit_statistic (const GstRuntimeStatistic *statistic, GstRuntimeStatisticVisitor visitor,
+                gpointer user_data)
+{
+  return visitor (statistic, user_data) ? 1 : 0;
+}
+static int
+visit_statistics_structure (const gchar *name, const GstStructure *structure,
+                            GstRuntimeStatisticVisitor visitor, gpointer user_data)
+{
+  GstRuntimeStatistic open = { GST_RUNTIME_STATISTIC_STRUCTURE, name };
+  GstRuntimeStatistic end = { GST_RUNTIME_STATISTIC_END };
+  open.text = gst_structure_get_name (structure);
+  int result = emit_statistic (&open, visitor, user_data);
+  /* In the structure's own field order. */
+  for (guint i = 0, n = gst_structure_n_fields (structure); !result && i < n; i++)
+    {
+      const gchar *field = gst_structure_nth_field_name (structure, i);
+      result = visit_statistic (field, gst_structure_get_value (structure, field), visitor,
+                                user_data);
+    }
+  return result ? result : emit_statistic (&end, visitor, user_data);
+}
+static int
+visit_statistics_list (const gchar *name, const GValue *value,
+                       GstRuntimeStatisticVisitor visitor, gpointer user_data)
+{
+  GstRuntimeStatistic open = { GST_RUNTIME_STATISTIC_LIST, name };
+  GstRuntimeStatistic end = { GST_RUNTIME_STATISTIC_END };
+  int result = emit_statistic (&open, visitor, user_data);
+  if (G_VALUE_TYPE (value) == G_TYPE_VALUE_ARRAY)
+    {
+      GValueArray *array = g_value_get_boxed (value);
+      for (guint i = 0; !result && array && i < array->n_values; i++)
+        result = visit_statistic (NULL, g_value_array_get_nth (array, i), visitor, user_data);
+    }
+  else if (GST_VALUE_HOLDS_LIST (value))
+    for (guint i = 0, n = gst_value_list_get_size (value); !result && i < n; i++)
+      result = visit_statistic (NULL, gst_value_list_get_value (value, i), visitor, user_data);
+  else
+    for (guint i = 0, n = gst_value_array_get_size (value); !result && i < n; i++)
+      result = visit_statistic (NULL, gst_value_array_get_value (value, i), visitor, user_data);
+  return result ? result : emit_statistic (&end, visitor, user_data);
+}
+static int
+visit_statistic (const gchar *name, const GValue *value, GstRuntimeStatisticVisitor visitor,
+                 gpointer user_data)
+{
+  GstRuntimeStatistic statistic = { 0, name };
+  GType type = G_VALUE_TYPE (value);
+  if (type == GST_TYPE_STRUCTURE && gst_value_get_structure (value))
+    return visit_statistics_structure (name, gst_value_get_structure (value), visitor, user_data);
+  if (type == G_TYPE_VALUE_ARRAY || GST_VALUE_HOLDS_LIST (value) || GST_VALUE_HOLDS_ARRAY (value))
+    return visit_statistics_list (name, value, visitor, user_data);
+  if (type == G_TYPE_INT)
+    {
+      statistic.kind = GST_RUNTIME_STATISTIC_INT;
+      statistic.integer = g_value_get_int (value);
+    }
+  else if (type == G_TYPE_UINT)
+    {
+      statistic.kind = GST_RUNTIME_STATISTIC_UINT;
+      statistic.unsigned_integer = g_value_get_uint (value);
+    }
+  else if (type == G_TYPE_INT64)
+    {
+      statistic.kind = GST_RUNTIME_STATISTIC_INT64;
+      statistic.integer = g_value_get_int64 (value);
+    }
+  else if (type == G_TYPE_UINT64)
+    {
+      statistic.kind = GST_RUNTIME_STATISTIC_UINT64;
+      statistic.unsigned_integer = g_value_get_uint64 (value);
+    }
+  else if (type == G_TYPE_DOUBLE)
+    {
+      statistic.kind = GST_RUNTIME_STATISTIC_DOUBLE;
+      statistic.number = g_value_get_double (value);
+    }
+  else if (type == G_TYPE_BOOLEAN)
+    {
+      statistic.kind = GST_RUNTIME_STATISTIC_BOOLEAN;
+      statistic.boolean = g_value_get_boolean (value);
+    }
+  else if (type == G_TYPE_STRING && g_value_get_string (value))
+    {
+      statistic.kind = GST_RUNTIME_STATISTIC_STRING;
+      statistic.text = g_value_get_string (value);
+    }
+  else
+    /* A value no kind names is refused rather than dropped or written as text. */
+    return GST_FLOW_ERROR;
+  return emit_statistic (&statistic, visitor, user_data);
+}
+int
+gst_runtime_rtp_session_statistics (GstRuntimeRtpSession *s, GstRuntimeStatisticVisitor visitor,
+                                    gpointer user_data)
 {
   GstStructure *stats = NULL;
-  if (!s || !s->engine)
-    return NULL;
+  if (!s || !s->engine || !visitor)
+    return GST_FLOW_ERROR;
   g_object_get (s->rtp, "stats", &stats, NULL);
   if (!stats)
-    return NULL;
+    return GST_FLOW_ERROR;
   if (s->rtx_send)
     {
       guint requests, sent, received;
@@ -447,14 +547,9 @@ gst_runtime_rtp_session_stats (GstRuntimeRtpSession *s)
       gst_structure_set (stats, "rtx-requests", G_TYPE_UINT, requests, "rtx-sent", G_TYPE_UINT,
                          sent, "rtx-received", G_TYPE_UINT, received, NULL);
     }
-  gchar *text = gst_structure_to_string (stats);
+  int result = visit_statistics_structure (NULL, stats, visitor, user_data);
   gst_structure_free (stats);
-  return text;
-}
-void
-gst_runtime_rtp_session_stats_free (gchar *stats)
-{
-  g_free (stats);
+  return result;
 }
 void
 gst_runtime_rtp_session_stop (GstRuntimeRtpSession *s)
