@@ -87,12 +87,13 @@ session_live (RuntimeSession *session)
       return TRUE;
   return FALSE;
 }
+/* The control connection is unusable. A track keeps the state its last
+ * response confirmed: an RTSP session is not bound to its connection
+ * (RFC 2326 1.1), and the client's state changes only on a reply. */
 static GstRTSPResult
 unknown (GstRTSPRuntimeClient *client, GstRTSPResult result)
 {
   client->unknown = TRUE;
-  if (client->pending)
-    transition (client, lookup (client, client->session), GST_RTSP_RUNTIME_UNKNOWN);
   return result;
 }
 static gboolean
@@ -309,8 +310,9 @@ int
 gst_rtsp_runtime_client_send_data_begin (GstRTSPRuntimeClient *client, guint8 channel,
                                          const guint8 *bytes, gsize length)
 {
-  g_return_val_if_fail (client && bytes && length && length <= 65535 && !client->unknown,
-                        GST_RTSP_EINVAL);
+  g_return_val_if_fail (client && bytes && length && length <= 65535, GST_RTSP_EINVAL);
+  if (client->unknown)
+    return GST_RTSP_EINVAL;
   if (gst_rtsp_connection_write_pending (client->connection))
     return 1;
   gboolean found = FALSE;
@@ -324,8 +326,7 @@ gst_rtsp_runtime_client_send_data_begin (GstRTSPRuntimeClient *client, guint8 ch
         {
           RuntimeTrack *track = track_value;
           GstRTSPRange range = track->transport->interleaved;
-          if (track->state != GST_RTSP_RUNTIME_CLOSED && track->state != GST_RTSP_RUNTIME_UNKNOWN
-              && range.min >= 0 && channel >= range.min
+          if (track->state != GST_RTSP_RUNTIME_CLOSED && range.min >= 0 && channel >= range.min
               && channel <= (range.max < 0 ? range.min : range.max))
             found = TRUE;
         }
@@ -614,16 +615,6 @@ gst_rtsp_runtime_client_invalidate (GstRTSPRuntimeClient *client)
   if (!client)
     return;
   client->unknown = TRUE;
-  GHashTableIter sessions, tracks;
-  gpointer session, track;
-  g_hash_table_iter_init (&sessions, client->sessions);
-  while (g_hash_table_iter_next (&sessions, NULL, &session))
-    {
-      g_hash_table_iter_init (&tracks, ((RuntimeSession *)session)->tracks);
-      while (g_hash_table_iter_next (&tracks, NULL, &track))
-        if (((RuntimeTrack *)track)->state != GST_RTSP_RUNTIME_CLOSED)
-          ((RuntimeTrack *)track)->state = GST_RTSP_RUNTIME_UNKNOWN;
-    }
   gst_rtsp_connection_flush (client->connection, TRUE);
 }
 
@@ -636,19 +627,8 @@ gst_rtsp_runtime_client_request_ready (GstRTSPRuntimeClient *client)
 gboolean
 gst_rtsp_runtime_client_session_active (GstRTSPRuntimeClient *client, const gchar *id)
 {
-  RuntimeSession *session = client ? lookup (client, id) : NULL;
-  if (!session)
-    return FALSE;
-  GHashTableIter iter;
-  gpointer key, value;
-  g_hash_table_iter_init (&iter, session->tracks);
-  while (g_hash_table_iter_next (&iter, &key, &value))
-    {
-      GstRTSPRuntimeState state = ((RuntimeTrack *)value)->state;
-      if (state != GST_RTSP_RUNTIME_CLOSED && state != GST_RTSP_RUNTIME_UNKNOWN)
-        return TRUE;
-    }
-  return FALSE;
+  RuntimeSession *session = client && !client->unknown ? lookup (client, id) : NULL;
+  return session && session_live (session);
 }
 
 gboolean

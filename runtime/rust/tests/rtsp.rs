@@ -181,6 +181,46 @@ fn overlapping_interleaved_channels_cannot_bind_a_sibling_track() {
     }
 }
 
+/// A connection that ends leaves each track as its last response confirmed
+/// it: an RTSP session is not bound to its connection (RFC 2326 1.1), and a
+/// PAUSE that drew no response changed nothing. The ended connection takes
+/// no interleaved data and no request.
+#[test]
+fn a_track_keeps_its_confirmed_state_when_its_connection_ends() {
+    use boundless_media::rtsp::TrackState;
+    for (version, wire) in [(Version::V1, "1.0"), (Version::V2, "2.0")] {
+        let (stream, mut server) = UnixStream::pair().unwrap();
+        let mut client = Rtsp::from_stream(stream.into(), URI, version, 4096).unwrap();
+        client.request("SETUP", URI, &[], &[], SECOND).0.unwrap();
+        request(&mut server);
+        server.write_all(format!("RTSP/{wire} 200 OK\r\nCSeq: 1\r\nSession: s\r\nTransport: RTP/AVP/TCP;unicast;interleaved=4-5\r\n\r\n").as_bytes()).unwrap();
+        client.receive(SECOND).0.unwrap();
+        client
+            .request("PLAY", URI, &[("Session", "s")], &[], SECOND)
+            .0
+            .unwrap();
+        request(&mut server);
+        server
+            .write_all(format!("RTSP/{wire} 200 OK\r\nCSeq: 2\r\nSession: s\r\n\r\n").as_bytes())
+            .unwrap();
+        client.receive(SECOND).0.unwrap();
+        assert_eq!(client.state("s", URI).unwrap(), Some(TrackState::Playing));
+        client
+            .request("PAUSE", URI, &[("Session", "s")], &[], SECOND)
+            .0
+            .unwrap();
+        request(&mut server);
+        drop(server);
+        assert!(client.receive(SECOND).0.is_err());
+        assert_eq!(client.state("s", URI).unwrap(), Some(TrackState::Playing));
+        assert_eq!(client.send_data_begin(4, &[0, 255, 1]), Err(Error::INVALID));
+        assert_eq!(
+            client.request_begin("OPTIONS", URI, &[], &[]).0,
+            Err(Error::INVALID)
+        );
+    }
+}
+
 #[test]
 fn native_incremental_reader_preserves_every_fragment_and_cancel_evidence() {
     for wire in [
@@ -454,8 +494,8 @@ fn a_digest_proof_that_does_not_verify_fails_the_connection() {
     assert!(!message.raw.is_empty());
     assert_eq!(message.authentication.unwrap().server_proof, Some(false));
     assert_eq!(
-        client.state("s", URI).unwrap(),
-        Some(boundless_media::rtsp::TrackState::Unknown)
+        client.request_begin("OPTIONS", URI, &[], &[]).0,
+        Err(Error::INVALID)
     );
 }
 /// Basic goes with every request, and RTSP 2.0 carries it only over TLS; a

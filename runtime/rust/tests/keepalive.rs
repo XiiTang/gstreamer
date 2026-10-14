@@ -223,7 +223,7 @@ fn negative_keepalive_stops_its_cycle_without_replaying_or_closing_the_connectio
     assert!(peer.requests.try_recv().unwrap().starts_with("OPTIONS "));
 }
 #[test]
-fn cancelling_an_inflight_cycle_retains_its_response_deadline_and_unknown_outcome() {
+fn cancelling_an_inflight_cycle_retains_its_response_deadline_and_the_confirmed_state() {
     let (mut native, peer) = connected(Version::V1);
     peer.status.store(0, Ordering::Release);
     let cancel = native
@@ -249,7 +249,7 @@ fn cancelling_an_inflight_cycle_retains_its_response_deadline_and_unknown_outcom
                 assert_eq!(failure.dispatch.sequence, 2);
                 assert_eq!(
                     native.state("s", URI).unwrap(),
-                    Some(boundless_media::rtsp::TrackState::Unknown)
+                    Some(boundless_media::rtsp::TrackState::Ready)
                 );
                 break;
             }

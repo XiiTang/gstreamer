@@ -27,7 +27,6 @@ pub enum TrackState {
     Playing,
     Recording,
     Closed,
-    Unknown,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Dispatch {
@@ -744,7 +743,6 @@ impl Rtsp {
                 1 => Some(TrackState::Playing),
                 2 => Some(TrackState::Recording),
                 3 => Some(TrackState::Closed),
-                4 => Some(TrackState::Unknown),
                 _ => None,
             },
         )

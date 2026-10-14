@@ -37,7 +37,8 @@ it is not the product's dependency discovery or packaging policy.
 state on a supplied connected stream. It never resolves or connects a target,
 selects a fallback version, follows a redirect, retries authentication or sends
 TEARDOWN during release. Responses preserve native parsed fields and exact wire
-bytes. Partial-message cancellation is interruptible; uncertain state is retained.
+bytes. Partial-message cancellation is interruptible. A track's state changes
+only on a response; a connection that ends leaves it as its last response confirmed.
 The opaque `gstruntimeapi` ABI and `rust` crate give the Runtime an exclusive
 movable owner and a separately shareable cancellation handle.
 
@@ -145,6 +146,30 @@ structure's name, balanced nesting, every kind the session holds, and a
 visitor stopping the walk; `tests/rtp_feedback.c` reads `rtx-sent` as a
 `UINT` at least the repairs observed; the crate's `rtp` tests read a sender's
 `packets-sent` as `Uint64` and `received-rr` as a list.
+
+## Track state after the connection ends (2026-10-14)
+
+A failed read, write or proof, or `gst_rtsp_runtime_client_invalidate`, used to
+rewrite every track not Closed to `GST_RTSP_RUNTIME_UNKNOWN`, which the Runtime
+reported as the track's state. That claimed something about the server the
+client cannot know: an RTSP session is not bound to its connection (RFC 2326
+section 1.1), a client's state changes only on a reply (Appendix A), and
+`rtspsrc` likewise changes `src->state` only after a request succeeds. The
+connection's end is its own fact, which the Runtime reports as how the
+connection ended.
+
+The client now only marks itself unusable: each track keeps the state its last
+response confirmed, and `GST_RTSP_RUNTIME_UNKNOWN` and Rust's
+`TrackState::Unknown` are gone. Interleaved data and session activity read the
+client's own flag instead of a track state, so an ended connection still takes
+no data, reports no active session and begins no request.
+
+`tests/rtsp.rs`'s `a_track_keeps_its_confirmed_state_when_its_connection_ends`
+drops the connection after PLAY with a PAUSE unanswered, on both versions: the
+track stays Playing, and data and a new request are refused. Against
+e18956c772b5bdeb07d59aaa215714668dc64c81 it failed with `Some(Unknown)`, as did
+`tests/keepalive.rs`'s timed-out cycle, which now keeps Ready;
+`tests/rtsp_transport.c` checks the same after `invalidate`.
 
 ## RTSP authentication (2026-10-06)
 

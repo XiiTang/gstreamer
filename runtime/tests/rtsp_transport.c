@@ -296,8 +296,13 @@ explicit_state (GstRTSPVersion version)
   g_free (wrong);
   g_assert_cmpint (gst_rtsp_runtime_client_receive (client, &reply, 1000000), ==, GST_RTSP_EPARSE);
   gst_rtsp_runtime_client_invalidate (client);
-  state_is (client, two, GST_RTSP_RUNTIME_UNKNOWN);
+  /* The PAUSE drew no response it could take: two stays as PLAY left it. */
+  state_is (client, two, GST_RTSP_RUNTIME_PLAYING);
   state_is (client, one, GST_RTSP_RUNTIME_CLOSED);
+  g_assert_false (gst_rtsp_runtime_client_session_active (client, session));
+  const guint8 data[] = { 0 };
+  g_assert_cmpint (gst_rtsp_runtime_client_send_data_begin (client, 2, data, sizeof (data)), ==,
+                   GST_RTSP_EINVAL);
   g_assert_cmpint (gst_rtsp_runtime_client_request (client, &request, 1000000), ==,
                    GST_RTSP_EINVAL);
   gst_rtsp_message_unset (&reply);
