@@ -228,19 +228,44 @@ impl Rtsp {
     /// Takes a complete response read from the native client: a 401 the
     /// owner answers names the CSeq its request is sent again as, and that
     /// request begins as soon as the writer is free; a reply to a Digest
-    /// answer whose proof fails invalidates the client.
-    fn authenticate_received(&mut self, message: &mut Message) -> Result<(), Error> {
+    /// answer whose proof fails invalidates the client. The native client
+    /// holds a Digest request's final response, and it changes a session or
+    /// track only once accepted here.
+    fn authenticate_received(
+        &mut self,
+        native: &NativeMessage,
+        message: &mut Message,
+    ) -> Result<(), Error> {
         let Some(auth) = self.authentication.as_mut() else {
             return Ok(());
         };
         if message.kind != 2 || message.status < 200 {
             return Ok(());
         }
+        let held = auth.holds();
         if let Err(error) = auth.received(message) {
             unsafe { ffi::gst_runtime_rtsp_invalidate(self.inner.0.as_ptr()) };
             return Err(error);
         }
+        if held {
+            Error::check(unsafe {
+                ffi::gst_runtime_rtsp_take_response(self.inner.0.as_ptr(), native.0.as_ptr())
+            })?;
+        }
         self.answer().map_err(|(_, error)| error)
+    }
+    /// The final response to the Digest request just begun is held until
+    /// [`Self::authenticate_received`] accepts it.
+    fn hold(&mut self, digest: bool) -> Result<(), Error> {
+        if !digest {
+            return Ok(());
+        }
+        let held =
+            Error::check(unsafe { ffi::gst_runtime_rtsp_hold_response(self.inner.0.as_ptr()) });
+        if held.is_err() {
+            unsafe { ffi::gst_runtime_rtsp_invalidate(self.inner.0.as_ptr()) };
+        }
+        held
     }
     /// Begins the request due again once the writer is free. It must be sent
     /// as the CSeq its 401 named; a request that fails after it may have been
@@ -269,9 +294,9 @@ impl Rtsp {
                 Err((dispatch, Error::INVALID))
             }
             Ok(true) => {
-                auth.dispatched(request, sequence);
+                let digest = auth.dispatched(request, sequence);
                 auth.writing = true;
-                Ok(())
+                self.hold(digest).map_err(|error| (dispatch, error))
             }
             Ok(false) => {
                 auth.keep_due(request, sequence);
@@ -330,14 +355,18 @@ impl Rtsp {
             Ok(request) => request,
             Err(error) => return (Err(error), Dispatch::default()),
         };
-        let result = self.begin(method, uri, &request.headers(), body);
-        if matches!(result.0, Ok(true)) {
-            self.authentication
+        let (result, dispatch) = self.begin(method, uri, &request.headers(), body);
+        if matches!(result, Ok(true)) {
+            let digest = self
+                .authentication
                 .as_mut()
                 .unwrap()
-                .dispatched(request, result.1.sequence);
+                .dispatched(request, dispatch.sequence);
+            if let Err(error) = self.hold(digest) {
+                return (Err(error), dispatch);
+            }
         }
-        result
+        (result, dispatch)
     }
     fn begin(
         &mut self,
@@ -515,10 +544,10 @@ impl Rtsp {
             ffi::gst_runtime_rtsp_receive(self.inner.0.as_ptr(), timeout(limit), &mut message)
         });
         // The native ABI always owns a result message, including failed reads.
-        let message = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
-        let mut message = message.copy();
+        let native = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
+        let mut message = native.copy();
         let result = result.and_then(|()| {
-            self.authenticate_received(&mut message)?;
+            self.authenticate_received(&native, &mut message)?;
             // The request sent again is written before this returns.
             while self.authentication.as_ref().is_some_and(|auth| auth.busy()) {
                 self.answer_step().map_err(|(_, error)| error)?;
@@ -555,10 +584,12 @@ impl Rtsp {
         } else {
             Error::check(code).map(|_| true)
         };
-        let message = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
-        let mut message = message.copy();
+        let native = NativeMessage(NonNull::new(message).expect("Native RTSP message contract"));
+        let mut message = native.copy();
         let result = match result {
-            Ok(true) => self.authenticate_received(&mut message).map(|()| true),
+            Ok(true) => self
+                .authenticate_received(&native, &mut message)
+                .map(|()| true),
             other => other,
         };
         self.keepalives

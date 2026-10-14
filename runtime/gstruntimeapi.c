@@ -316,6 +316,16 @@ gst_runtime_rtsp_invalidate (GstRuntimeRtsp *client)
 {
   gst_rtsp_runtime_client_invalidate (client->client);
 }
+int
+gst_runtime_rtsp_hold_response (GstRuntimeRtsp *client)
+{
+  return gst_rtsp_runtime_client_hold_response (client->client);
+}
+int
+gst_runtime_rtsp_take_response (GstRuntimeRtsp *client, GstRuntimeRtspMessage *message)
+{
+  return gst_rtsp_runtime_client_take_response (client->client, &message->message);
+}
 
 int
 gst_runtime_rtsp_request_ready (GstRuntimeRtsp *client)

@@ -107,6 +107,10 @@ impl Authentication {
     pub(super) fn is_basic(&self) -> bool {
         matches!(self.credential, Credential::Basic(_))
     }
+    /// A Digest request is in flight: its final response is held natively.
+    pub(super) fn holds(&self) -> bool {
+        self.in_flight.is_some()
+    }
     /// A request sent again is due or being written: nothing else is sent.
     pub(super) fn busy(&self) -> bool {
         self.due.is_some() || self.writing
@@ -173,13 +177,16 @@ impl Authentication {
             kept: Some((sent, proof)),
         })
     }
-    /// The request just begun as `sequence` is in flight.
-    pub(super) fn dispatched(&mut self, request: Authorized, sequence: u32) {
+    /// The request just begun as `sequence` is in flight. True when it is
+    /// a Digest request, whose final response [`Self::received`] must accept
+    /// before it changes any state.
+    pub(super) fn dispatched(&mut self, request: Authorized, sequence: u32) -> bool {
         self.in_flight = request.kept.map(|(sent, proof)| InFlight {
             sent,
             sequence,
             proof,
         });
+        self.in_flight.is_some()
     }
     /// Takes a complete response to the request in flight. A 401 offering a
     /// Digest challenge to a request not yet answered makes it due again and

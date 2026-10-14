@@ -493,10 +493,50 @@ fn a_digest_proof_that_does_not_verify_fails_the_connection() {
     assert_eq!(result, Err(Error::AUTHENTICATION));
     assert!(!message.raw.is_empty());
     assert_eq!(message.authentication.unwrap().server_proof, Some(false));
+    // The unproven reply set up nothing.
+    assert_eq!(client.state("s", URI).unwrap(), None);
     assert_eq!(
         client.request_begin("OPTIONS", URI, &[], &[]).0,
         Err(Error::INVALID)
     );
+}
+/// A reply whose proof fails changes no track: the PLAY it answers left the
+/// track Ready, as the last reply taken confirmed it.
+#[test]
+fn a_reply_whose_digest_proof_fails_changes_no_track() {
+    use boundless_media::rtsp::TrackState;
+    let (stream, mut server) = UnixStream::pair().unwrap();
+    server.set_read_timeout(Some(SECOND)).unwrap();
+    let mut client = Rtsp::from_stream(stream.into(), URI, Version::V2, 4096).unwrap();
+    digest(&mut client);
+    client
+        .request(
+            "SETUP",
+            URI,
+            &[("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")],
+            &[],
+            SECOND,
+        )
+        .0
+        .unwrap();
+    request(&mut server);
+    server.write_all(b"RTSP/2.0 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Digest realm=\"camera\",nonce=\"n\",algorithm=SHA-256,qop=\"auth\"\r\n\r\n").unwrap();
+    client.receive(SECOND).0.unwrap();
+    request(&mut server);
+    // No proof is taken at the server's word.
+    server.write_all(b"RTSP/2.0 200 OK\r\nCSeq: 2\r\nSession: s\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n").unwrap();
+    client.receive(SECOND).0.unwrap();
+    assert_eq!(client.state("s", URI).unwrap(), Some(TrackState::Ready));
+    client
+        .request("PLAY", URI, &[("Session", "s")], &[], SECOND)
+        .0
+        .unwrap();
+    request(&mut server);
+    server.write_all(b"RTSP/2.0 200 OK\r\nCSeq: 3\r\nSession: s\r\nAuthentication-Info: rspauth=\"wrong\"\r\n\r\n").unwrap();
+    let (result, message) = client.receive(SECOND);
+    assert_eq!(result, Err(Error::AUTHENTICATION));
+    assert_eq!(message.authentication.unwrap().server_proof, Some(false));
+    assert_eq!(client.state("s", URI).unwrap(), Some(TrackState::Ready));
 }
 /// Basic goes with every request, and RTSP 2.0 carries it only over TLS; a
 /// 401 to it is the response. The caller cannot set its own Authorization.

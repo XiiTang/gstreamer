@@ -171,6 +171,31 @@ e18956c772b5bdeb07d59aaa215714668dc64c81 it failed with `Some(Unknown)`, as did
 `tests/keepalive.rs`'s timed-out cycle, which now keeps Ready;
 `tests/rtsp_transport.c` checks the same after `invalidate`.
 
+## A reply whose proof fails changes no track (2026-10-15)
+
+The native client applied a final response to its sessions and tracks while
+reading it, and only then did the adapter check its Digest proof: a SETUP reply
+whose `rspauth` failed still created its track `Ready`, and such a PLAY reply
+still made it `Playing`, though the reply was rejected and the client
+invalidated. A track's state is what an accepted response confirmed.
+
+The native client now holds the final response to a request on demand:
+`gst_rtsp_runtime_client_hold_response` (`gst_runtime_rtsp_hold_response`)
+after the request begins, and `gst_rtsp_runtime_client_take_response`
+(`gst_runtime_rtsp_take_response`) applies it once accepted. A held response is
+read and its CSeq, version and kind checked as before; what it confirms of the
+sessions and tracks waits. The adapter holds the final response of every
+Digest request and takes it once its proof, or a 401 to it, is accepted, before
+it sends a request again. A failed proof invalidates the client with the held
+response never taken, so each track stays as the last accepted response left
+it. Basic and unauthenticated requests are not held.
+
+`tests/rtsp.rs`'s `a_reply_whose_digest_proof_fails_changes_no_track` keeps a
+track `Ready` after a PLAY reply with a failing proof, and
+`a_digest_proof_that_does_not_verify_fails_the_connection` finds no track after
+such a SETUP reply. Against f5427ea8aa6a679704e82ea951d85f53d4b02e8a they failed
+with `Some(Playing)` and `Some(Ready)`.
+
 ## RTSP authentication (2026-10-06)
 
 A connection configured with a credential authenticates every request the
@@ -186,7 +211,7 @@ connection's later requests answer from the start with the adopted nonce,
 counted, until the server challenges again or proves a `nextnonce`. `auth` is
 answered where offered, `auth-int` where it is all that is offered, since the
 adapter holds whole bodies. A reply whose proof does not verify invalidates the
-client; a reply with none is taken at its word. Only a Digest connection keeps a
+client and changes no track; a reply with none is taken at its word. Only a Digest connection keeps a
 copy of the request in flight. The caller chooses no challenge, algorithm or qop
 and cannot set `Authorization`. `request` is `request_begin` and `write_step`, so
 one path authenticates; `receive` keeps the native read, whose cancellation

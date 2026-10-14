@@ -31,6 +31,9 @@ struct _GstRTSPRuntimeClient
   gchar *root;
   GHashTable *sessions;
   gboolean pending, unknown, writing_request;
+  /* The final response to the request in flight changes no state until its
+   * owner takes it; one is held, read but not yet taken. */
+  gboolean hold, held;
   guint32 cseq;
   GstRTSPMethod method;
   gchar *uri, *session;
@@ -49,6 +52,8 @@ static void
 pending_clear (GstRTSPRuntimeClient *client)
 {
   client->pending = FALSE;
+  client->hold = FALSE;
+  client->held = FALSE;
   g_clear_pointer (&client->uri, g_free);
   g_clear_pointer (&client->session, g_free);
 }
@@ -342,6 +347,7 @@ gst_rtsp_runtime_client_send_data_begin (GstRTSPRuntimeClient *client, guint8 ch
     client->writing_request = FALSE;
   return result;
 }
+static GstRTSPResult take_final (GstRTSPRuntimeClient *client, GstRTSPMessage *message);
 static GstRTSPResult
 receive_result (GstRTSPRuntimeClient *client, GstRTSPMessage *message, GstRTSPResult result)
 {
@@ -353,7 +359,7 @@ receive_result (GstRTSPRuntimeClient *client, GstRTSPMessage *message, GstRTSPRe
     return message->type_data.request.version == client->version
                ? GST_RTSP_OK
                : unknown (client, GST_RTSP_EPARSE);
-  if (message->type != GST_RTSP_MESSAGE_RESPONSE || !client->pending
+  if (message->type != GST_RTSP_MESSAGE_RESPONSE || !client->pending || client->held
       || client->dispatch == GST_RTSP_RUNTIME_NOT_SENT
       || message->type_data.response.version != client->version)
     return unknown (client, GST_RTSP_EPARSE);
@@ -361,9 +367,40 @@ receive_result (GstRTSPRuntimeClient *client, GstRTSPMessage *message, GstRTSPRe
   if (gst_rtsp_message_get_header (message, GST_RTSP_HDR_CSEQ, &sequence, 0) != GST_RTSP_OK
       || g_ascii_strtoull (sequence, NULL, 10) != client->cseq)
     return unknown (client, GST_RTSP_EPARSE);
-  guint code = message->type_data.response.code;
-  if (code < 200)
+  if (message->type_data.response.code < 200)
     return GST_RTSP_OK;
+  if (client->hold)
+    {
+      client->held = TRUE;
+      return GST_RTSP_OK;
+    }
+  return take_final (client, message);
+}
+GstRTSPResult
+gst_rtsp_runtime_client_hold_response (GstRTSPRuntimeClient *client)
+{
+  g_return_val_if_fail (client, GST_RTSP_EINVAL);
+  if (!client->pending || client->unknown || client->held)
+    return GST_RTSP_EINVAL;
+  client->hold = TRUE;
+  return GST_RTSP_OK;
+}
+GstRTSPResult
+gst_rtsp_runtime_client_take_response (GstRTSPRuntimeClient *client, GstRTSPMessage *message)
+{
+  g_return_val_if_fail (client && message, GST_RTSP_EINVAL);
+  if (!client->held || client->unknown)
+    return GST_RTSP_EINVAL;
+  client->hold = FALSE;
+  client->held = FALSE;
+  return take_final (client, message);
+}
+/* A final response to the request in flight: what it confirms of the
+ * sessions and their tracks. */
+static GstRTSPResult
+take_final (GstRTSPRuntimeClient *client, GstRTSPMessage *message)
+{
+  guint code = message->type_data.response.code;
   RuntimeSession *session = lookup (client, client->session);
   if (code >= 200 && code < 300)
     {
