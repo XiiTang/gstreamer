@@ -1162,6 +1162,119 @@ GST_START_TEST (test_rtxsend_header_extensions)
 
 GST_END_TEST;
 
+#ifndef GST_DISABLE_GST_DEBUG
+typedef struct
+{
+  GstElement *element;
+  GAsyncQueue *messages, *pushed;
+  GstFlowReturn flow;
+  GstPadEventFunction original_event;
+  gboolean accepted;
+} PushResults;
+
+static void
+collect_push_result (GstDebugCategory * category, GstDebugLevel level,
+    const gchar * file, const gchar * function, gint line, GObject * object,
+    GstDebugMessage * message, gpointer data)
+{
+  PushResults *results = data;
+  const gchar *text = gst_debug_message_get (message);
+
+  if (object == G_OBJECT (results->element) &&
+      g_str_has_prefix (text, "pushed RTX "))
+    g_async_queue_push (results->messages, g_strdup (text));
+}
+
+static GstFlowReturn
+rtx_downstream_flow (GstPad * pad, GstObject * parent, GstBuffer * buffer)
+{
+  PushResults *results = g_object_get_data (G_OBJECT (pad), "push-results");
+  GstFlowReturn flow = results->flow;
+
+  gst_buffer_unref (buffer);
+  g_async_queue_push (results->pushed, results);
+  return flow;
+}
+
+static gboolean
+rtx_downstream_event (GstPad * pad, GstObject * parent, GstEvent * event)
+{
+  PushResults *results = g_object_get_data (G_OBJECT (pad), "push-results");
+
+  if (GST_EVENT_TYPE (event) == GST_EVENT_EOS) {
+    gboolean accepted = results->accepted;
+
+    gst_event_unref (event);
+    g_async_queue_push (results->pushed, results);
+    return accepted;
+  }
+  return results->original_event (pad, parent, event);
+}
+
+static void
+check_rtx_push_result (GstFlowReturn flow, gboolean event, gboolean accepted)
+{
+  GstHarness *h = gst_harness_new ("rtprtxsend");
+  GstStructure *pt_map = create_rtx_map ("application/x-rtp-pt-map", 96, 106);
+  GstEvent *eos = gst_event_new_eos ();
+  PushResults results = { gst_object_ref (h->element), g_async_queue_new (),
+    g_async_queue_new (), flow, GST_PAD_EVENTFUNC (h->sinkpad), accepted
+  };
+  gchar *expected = event ? g_strdup_printf ("pushed RTX event, result %d",
+      accepted) : g_strdup_printf ("pushed RTX buffer, result %s",
+      gst_flow_get_name (flow));
+  gchar *message;
+
+  g_object_set (h->element, "payload-type-map", pt_map, NULL);
+  gst_structure_free (pt_map);
+  gst_harness_set_src_caps_str (h, "application/x-rtp, clock-rate=(int)90000");
+  fail_unless_equals_int (gst_harness_push (h,
+          create_rtp_buffer (1234567, 96, 0)), GST_FLOW_OK);
+  gst_buffer_unref (gst_harness_pull (h));
+  g_object_set_data (G_OBJECT (h->sinkpad), "push-results", &results);
+  gst_pad_set_chain_function (h->sinkpad, rtx_downstream_flow);
+  gst_pad_set_event_function (h->sinkpad, rtx_downstream_event);
+  gst_debug_add_log_function (collect_push_result, &results, NULL);
+  if (event)
+    fail_unless (gst_harness_push_event (h, gst_event_ref (eos)));
+  else
+    fail_unless (gst_harness_push_upstream_event (h,
+            create_rtx_event (1234567, 96, 0)));
+  fail_unless (g_async_queue_timeout_pop (results.pushed, 10 * G_USEC_PER_SEC));
+  /* Stop joins the source task, so its return has been logged before checking. */
+  gst_harness_teardown (h);
+  gst_debug_remove_log_function (collect_push_result);
+  gst_object_unref (results.element);
+  message = g_async_queue_try_pop (results.messages);
+  fail_unless (message != NULL, "Missing result diagnostic: %s", expected);
+  fail_unless_equals_string (message, expected);
+  fail_unless_equals_int (g_async_queue_length (results.messages), 0);
+  g_free (message);
+  g_free (expected);
+  gst_event_unref (eos);
+  g_async_queue_unref (results.messages);
+  g_async_queue_unref (results.pushed);
+}
+
+GST_START_TEST (test_rtxsend_push_results_are_logged)
+{
+  gboolean active = gst_debug_is_active ();
+
+  gst_debug_set_active (TRUE);
+  gst_debug_set_threshold_for_name ("rtprtxsend", GST_LEVEL_LOG);
+  check_rtx_push_result (GST_FLOW_OK, FALSE, FALSE);
+  check_rtx_push_result (GST_FLOW_NOT_LINKED, FALSE, FALSE);
+  check_rtx_push_result (GST_FLOW_FLUSHING, FALSE, FALSE);
+  check_rtx_push_result (GST_FLOW_ERROR, FALSE, FALSE);
+  check_rtx_push_result (GST_FLOW_OK, TRUE, FALSE);
+  check_rtx_push_result (GST_FLOW_OK, TRUE, TRUE);
+  gst_debug_unset_threshold_for_name ("rtprtxsend");
+  gst_debug_set_active (active);
+}
+
+GST_END_TEST;
+#endif
+
 static Suite *
 rtprtx_suite (void)
 {
@@ -1171,6 +1284,10 @@ rtprtx_suite (void)
   tcase_set_timeout (tc_chain, 120);
 
   suite_add_tcase (s, tc_chain);
+
+#ifndef GST_DISABLE_GST_DEBUG
+  tcase_add_test (tc_chain, test_rtxsend_push_results_are_logged);
+#endif
 
   tcase_add_test (tc_chain, test_rtxsend_basic);
   tcase_add_test (tc_chain, test_rtxsend_disabled_enabled_disabled);

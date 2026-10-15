@@ -68,3 +68,21 @@ The test synchronizes with the actual source task and checks five fatal
 results, plus EOS and FLUSHING, through the bus. The whole affected suite,
 `meson test -C "$GOOD_BUILD" --no-rebuild --print-errorlogs
 elements_rtpjitterbuffer`, also passes (exit 0) on macOS arm64.
+
+## RTX push result diagnostics (issue #63, batch 5)
+
+The retransmission source task must read its downstream buffer and event
+push results. Its one queue consumer, `gst_rtp_rtx_send_src_loop`, now logs
+the flow name or event acceptance without changing delivery, queue handling
+or the task's result. This follows the base parser's flow-result logging.
+As with the other native debug messages, a build with `gst_debug=false`
+compiles these logs out.
+
+`GST_CHECKS=test_rtxsend_push_results_are_logged meson test -C "$GOOD_BUILD"
+--no-rebuild --print-errorlogs elements_rtprtx` fails without the patch
+(exit 1: missing push-result diagnostic), and passes with it (exit 0).
+It observes OK, NOT_LINKED, FLUSHING and ERROR, and both event acceptance
+results, after joining the source task. The whole affected suite,
+`meson test -C "$GOOD_BUILD" --no-rebuild --print-errorlogs elements_rtprtx`,
+passes all 16 checks (exit 0) on macOS arm64. Compiling the source with debug
+disabled and unused-variable warnings treated as errors also passes (exit 0).

@@ -1109,14 +1109,21 @@ gst_rtp_rtx_send_src_loop (GstRtpRtxSend * rtx)
     GST_LOG_OBJECT (rtx, "pushing rtx buffer %p", data->object);
 
     if (G_LIKELY (GST_IS_BUFFER (data->object))) {
+      GstFlowReturn ret G_GNUC_UNUSED;
+
       GST_OBJECT_LOCK (rtx);
       /* Update statistics just before pushing. */
       rtx->num_rtx_packets++;
       GST_OBJECT_UNLOCK (rtx);
 
-      gst_pad_push (rtx->srcpad, GST_BUFFER (data->object));
+      ret = gst_pad_push (rtx->srcpad, GST_BUFFER (data->object));
+      GST_LOG_OBJECT (rtx, "pushed RTX buffer, result %s",
+          gst_flow_get_name (ret));
     } else if (GST_IS_EVENT (data->object)) {
-      gst_pad_push_event (rtx->srcpad, GST_EVENT (data->object));
+      gboolean ret G_GNUC_UNUSED =
+          gst_pad_push_event (rtx->srcpad, GST_EVENT (data->object));
+
+      GST_LOG_OBJECT (rtx, "pushed RTX event, result %d", ret);
 
       /* after EOS, we should not send any more buffers,
        * even if there are more requests coming in */
