@@ -33,3 +33,18 @@ passes with the patch (exit 0). It checks the public state and notification,
 unlocked delivery, repeated failure, a non-expired timer and a stopped timer.
 The same helper's `dtls_interop` passes (exit 0), including independent
 OpenSSL exporter checks for all three profiles, on macOS arm64.
+
+## Jitterbuffer fatal flow results (issue #63, batch 4)
+
+When its source task pauses, a NOT_LINKED or fatal flow result below EOS
+must reach the owner's bus. `gst_rtp_jitter_buffer_loop` is the sole source
+loop and handles these results after unlocking, using `GST_ELEMENT_FLOW_ERROR`
+as upstream's base parser does. EOS and FLUSHING retain their normal handling.
+
+`GST_CHECKS=test_downstream_flow_error_reaches_bus meson test -C "$GOOD_BUILD"
+--no-rebuild --print-errorlogs elements_rtpjitterbuffer` fails without the
+patch (exit 1: no bus error for NOT_LINKED), and passes with it (exit 0).
+The test synchronizes with the actual source task and checks five fatal
+results, plus EOS and FLUSHING, through the bus. The whole affected suite,
+`meson test -C "$GOOD_BUILD" --no-rebuild --print-errorlogs
+elements_rtpjitterbuffer`, also passes (exit 0) on macOS arm64.

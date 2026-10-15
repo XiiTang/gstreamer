@@ -3628,6 +3628,74 @@ GST_START_TEST (test_early_rtcp_sr_allows_meta)
 
 GST_END_TEST;
 
+typedef struct
+{
+  GstFlowReturn result;
+  GAsyncQueue *pushed;
+} DownstreamFlow;
+
+static GstFlowReturn
+return_downstream_flow (GstPad * pad, GstObject * parent, GstBuffer * buffer)
+{
+  DownstreamFlow *flow = g_object_get_data (G_OBJECT (pad), "downstream-flow");
+
+  gst_buffer_unref (buffer);
+  g_async_queue_push (flow->pushed, flow);
+  return flow->result;
+}
+
+GST_START_TEST (test_downstream_flow_error_reaches_bus)
+{
+  const GstFlowReturn results[] = { GST_FLOW_NOT_LINKED, GST_FLOW_ERROR,
+    GST_FLOW_NOT_NEGOTIATED, GST_FLOW_NOT_SUPPORTED, GST_FLOW_CUSTOM_ERROR,
+    GST_FLOW_FLUSHING, GST_FLOW_EOS
+  };
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (results); i++) {
+    GstHarness *h = gst_harness_new ("rtpjitterbuffer");
+    GstBus *bus = gst_bus_new ();
+    GstPad *src = gst_element_get_static_pad (h->element, "src");
+    DownstreamFlow flow = { results[i], g_async_queue_new () };
+    GstMessage *message;
+
+    gst_element_set_bus (h->element, bus);
+    g_object_set (h->element, "latency", 0, "faststart-min-packets", 1, NULL);
+    g_object_set_data (G_OBJECT (h->sinkpad), "downstream-flow", &flow);
+    gst_pad_set_chain_function (h->sinkpad, return_downstream_flow);
+    gst_harness_set_src_caps_str (h, RTP_CAPS_STRING);
+    fail_unless_equals_int (gst_harness_push (h, generate_test_buffer (0)),
+        GST_FLOW_OK);
+    fail_unless (g_async_queue_timeout_pop (flow.pushed, 10 * G_USEC_PER_SEC));
+    /* The task holds this lock until it has handled the downstream return. */
+    GST_PAD_STREAM_LOCK (src);
+    GST_PAD_STREAM_UNLOCK (src);
+    message = gst_bus_pop_filtered (bus, GST_MESSAGE_ERROR);
+    if (results[i] == GST_FLOW_NOT_LINKED || results[i] < GST_FLOW_EOS) {
+      GError *error = NULL;
+      gchar *debug = NULL;
+
+      fail_unless (message != NULL, "No bus error for %s",
+          gst_flow_get_name (results[i]));
+      fail_unless (GST_MESSAGE_SRC (message) == GST_OBJECT (h->element));
+      gst_message_parse_error (message, &error, &debug);
+      fail_unless (error->domain == GST_STREAM_ERROR);
+      fail_unless (strstr (debug, gst_flow_get_name (results[i])) != NULL);
+      g_clear_error (&error);
+      g_free (debug);
+    } else {
+      fail_unless (message == NULL);
+    }
+    gst_clear_message (&message);
+    gst_object_unref (src);
+    gst_harness_teardown (h);
+    gst_object_unref (bus);
+    g_async_queue_unref (flow.pushed);
+  }
+}
+
+GST_END_TEST;
+
 static Suite *
 rtpjitterbuffer_suite (void)
 {
@@ -3635,6 +3703,8 @@ rtpjitterbuffer_suite (void)
   TCase *tc_chain = tcase_create ("general");
 
   suite_add_tcase (s, tc_chain);
+
+  tcase_add_test (tc_chain, test_downstream_flow_error_reaches_bus);
 
   tcase_add_test (tc_chain, test_push_forward_seq);
   tcase_add_test (tc_chain, test_push_backward_seq);

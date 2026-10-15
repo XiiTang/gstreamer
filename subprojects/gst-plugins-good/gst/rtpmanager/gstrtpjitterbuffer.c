@@ -4697,6 +4697,8 @@ pause:
       if (priv->segment_seqnum != GST_SEQNUM_INVALID)
         gst_event_set_seqnum (event, priv->segment_seqnum);
       gst_pad_push_event (priv->srcpad, event);
+    } else if (result == GST_FLOW_NOT_LINKED || result < GST_FLOW_EOS) {
+      GST_ELEMENT_FLOW_ERROR (jitterbuffer, result);
     }
     return;
   }
