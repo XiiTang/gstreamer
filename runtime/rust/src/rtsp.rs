@@ -789,8 +789,8 @@ impl NativeMessage {
     fn copy(&self) -> Message {
         let mut view = ffi::MessageView::default();
         unsafe { ffi::gst_runtime_rtsp_message_view(self.0.as_ptr(), &mut view) };
-        let string = |ptr| {
-            if ptr == std::ptr::null() {
+        let string = |ptr: *const std::ffi::c_char| {
+            if ptr.is_null() {
                 None
             } else {
                 Some(unsafe { CStr::from_ptr(ptr) }.to_bytes().to_vec())

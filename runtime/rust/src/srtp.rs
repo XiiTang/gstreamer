@@ -163,7 +163,7 @@ impl Context {
             Profile::AesCm128HmacSha1_80 => 10,
             _ => 16,
         };
-        let minimum = if rtcp { 8 + 4 + tag } else { 12 + tag };
+        let minimum = 12 + tag;
         if bytes.len() < minimum || bytes[0] >> 6 != 2 {
             return Err(Error::MALFORMED_PACKET);
         }
