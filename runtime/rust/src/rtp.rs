@@ -74,6 +74,28 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+/// The exact native state-change result retained by stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum StateChangeReturn {
+    Failure = 0,
+    Success = 1,
+    Async = 2,
+    NoPreroll = 3,
+}
+/// One stop's outcome, even when a Cancellation clone initiated it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StopOutcome {
+    pub state_change: StateChangeReturn,
+    /// One generic native flow error per bus error; message content stays native.
+    pub bus_errors: Vec<Error>,
+}
+#[repr(C)]
+#[derive(Default)]
+struct RawStopOutcome {
+    state_change: i32,
+    bus_errors: usize,
+}
 #[repr(C)]
 pub(crate) struct Settings {
     ssrc: u32,
@@ -237,6 +259,7 @@ unsafe extern "C" {
         user_data: *mut c_void,
     ) -> i32;
     fn gst_runtime_rtp_session_stop(session: *mut c_void);
+    fn gst_runtime_rtp_session_close(session: *mut c_void, outcome: *mut RawStopOutcome) -> i32;
     fn gst_runtime_rtp_session_free(session: *mut c_void);
 }
 struct Inner(NonNull<c_void>);
@@ -321,6 +344,23 @@ impl Session {
     }
     pub fn cancellation(&self) -> Cancellation {
         Cancellation(self.inner.clone())
+    }
+    /// Stop once and consume the retained result. A cancellation handle may
+    /// outlive this owner, but cannot consume its outcome or restart the session.
+    pub fn close(self) -> StopOutcome {
+        let mut raw = RawStopOutcome::default();
+        let result = unsafe { gst_runtime_rtp_session_close(self.inner.0.as_ptr(), &mut raw) };
+        assert_eq!(result, 0, "exclusive RTP stop outcome already consumed");
+        StopOutcome {
+            state_change: match raw.state_change {
+                0 => StateChangeReturn::Failure,
+                1 => StateChangeReturn::Success,
+                2 => StateChangeReturn::Async,
+                3 => StateChangeReturn::NoPreroll,
+                _ => unreachable!("invalid native state-change return"),
+            },
+            bus_errors: vec![Error(-5); raw.bus_errors],
+        }
     }
     /// False means bounded native input pressure; no bytes were admitted.
     pub fn try_write(&mut self, port: Input, packet: &[u8]) -> Result<bool, Error> {
@@ -423,6 +463,35 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(rtp_stop_test)]
+    #[test]
+    fn close_reads_errors_after_a_cancellation_clone_stopped_first() {
+        unsafe extern "C" {
+            fn test_rtp_stop_new(failure: i32, queued: u32, during: u32) -> *mut c_void;
+            fn test_rtp_stop_allow_free(session: *mut c_void);
+        }
+        for failure in [false, true] {
+            let raw = unsafe { test_rtp_stop_new(i32::from(failure), 2, 3) };
+            let session = Session {
+                inner: Arc::new(Inner(NonNull::new(raw).unwrap())),
+                _exclusive: PhantomData,
+            };
+            let cancellation = session.cancellation();
+            cancellation.clone().cancel();
+            let outcome = session.close();
+            assert_eq!(
+                outcome.state_change,
+                if failure {
+                    StateChangeReturn::Failure
+                } else {
+                    StateChangeReturn::Success
+                }
+            );
+            assert_eq!(outcome.bus_errors, vec![Error(-5); 5]);
+            cancellation.cancel();
+            unsafe { test_rtp_stop_allow_free(raw) };
+        }
+    }
     #[test]
     fn feedback_abi_enforces_capabilities_and_mapping() {
         let feedback = Feedback {

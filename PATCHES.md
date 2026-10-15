@@ -34,6 +34,26 @@ unlocked delivery, repeated failure, a non-expired timer and a stopped timer.
 The same helper's `dtls_interop` passes (exit 0), including independent
 OpenSSL exporter checks for all three profiles, on macOS arm64.
 
+## RTP stop outcome (issue #63, batch 4)
+
+The first stop retains its state-change result and every queued/during-stop
+bus error for the exclusive owner's consuming `Session::close`. Cancellation
+remains void, cloneable and unable to consume that result. NULL bus auto-flush
+is disabled; the stop checkpoint captures synchronous bus errors and waits
+for in-flight handlers before publishing. Read and close share its lock, so
+no reader takes an error already owned by stop. The current generic error
+representation is preserved.
+
+`runtime/tests/build_rtp_stop.py` and the Rust
+`close_reads_errors_after_a_cancellation_clone_stopped_first` regression
+cover a failing NULL transition and queued/during-stop bus errors when
+cancellation wins. The native regression cannot build on the original
+source, which has no retained outcome or close API (exit 1). The private
+native build and `build_rtp_stop.py` pass (exit 0); the consuming Rust
+regression and all ten library tests pass (exit 0) on macOS arm64. Strict
+all-target Clippy remains blocked by the same two diagnostics in unmodified
+RTSP/SRTP code reproduced on the original pinned source (exit 101).
+
 ## Jitterbuffer fatal flow results (issue #63, batch 4)
 
 When its source task pauses, a NOT_LINKED or fatal flow result below EOS

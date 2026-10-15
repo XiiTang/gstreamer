@@ -196,6 +196,25 @@ track `Ready` after a PLAY reply with a failing proof, and
 such a SETUP reply. Against f5427ea8aa6a679704e82ea951d85f53d4b02e8a they failed
 with `Some(Playing)` and `Some(Ready)`.
 
+## RTP stop outcome (issue #63)
+
+`rtp::Session::close(self) -> StopOutcome` consumes the exclusive owner and
+reads the first stop's exact `StateChangeReturn` plus one generic `Error(-5)`
+per bus error. `Cancellation::cancel(&self)` remains void and cloneable;
+whichever handle initiates stop publishes the result for that owner. Drop
+still cancels. Close waits for an in-progress stop before taking its result.
+The native pipeline disables NULL's bus auto-flush; a temporary synchronous
+bus handler captures errors posted during the state transition, and queued
+errors are drained before publishing. A concurrent read cannot consume bus
+errors after stop has claimed them. Full GStreamer error content is separate.
+
+`tests/build_rtp_stop.py --build "$MEDIA_BUILD" --output "$TEST_OUTPUT"`
+builds the native checkpoint regression and a test-only fixture library.
+The Rust regression is enabled with `--cfg rtp_stop_test`, linking
+`rtp_stop_fixture` from that output, and checks the consuming safe owner after
+a Cancellation clone stopped it first. The fixture is never in the private
+media artifact.
+
 ## RTSP authentication (2026-10-06)
 
 A connection configured with a credential authenticates every request the

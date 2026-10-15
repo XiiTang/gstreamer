@@ -19,6 +19,10 @@ struct _GstRuntimeRtpSession
   GstBus *bus;
   GstRuntimeRtpSettings settings;
   gint stopped;
+  GMutex stop_mutex;
+  GCond stop_done;
+  gboolean stop_complete, stop_taken, stop_handler_released;
+  GstRuntimeRtpStopOutcome stop_outcome;
   GMutex writers[3];
 };
 static GstCaps *
@@ -105,6 +109,9 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings)
           || !settings->rtx->cache_packets || settings->rtx->cache_packets > G_MAXINT16))
     return NULL;
   GstRuntimeRtpSession *s = g_new0 (GstRuntimeRtpSession, 1);
+  g_mutex_init (&s->stop_mutex);
+  g_cond_init (&s->stop_done);
+  s->stop_outcome.state_change = GST_STATE_CHANGE_SUCCESS;
   s->settings = *settings;
   s->settings.payload = NULL;
   s->settings.negotiated_caps = NULL;
@@ -376,7 +383,15 @@ gst_runtime_rtp_session_pull (GstRuntimeRtpSession *s, int port, guint64 timeout
   GstSample *sample = gst_app_sink_try_pull_sample (GST_APP_SINK (s->sink[port]), timeout);
   if (!sample)
     {
-      GstMessage *error = gst_bus_pop_filtered (s->bus, GST_MESSAGE_ERROR);
+      GstMessage *error;
+      g_mutex_lock (&s->stop_mutex);
+      if (g_atomic_int_get (&s->stopped))
+        {
+          g_mutex_unlock (&s->stop_mutex);
+          return GST_FLOW_FLUSHING;
+        }
+      error = gst_bus_pop_filtered (s->bus, GST_MESSAGE_ERROR);
+      g_mutex_unlock (&s->stop_mutex);
       if (error)
         {
           gst_message_unref (error);
@@ -551,15 +566,91 @@ gst_runtime_rtp_session_statistics (GstRuntimeRtpSession *s, GstRuntimeStatistic
   gst_structure_free (stats);
   return result;
 }
+static GstBusSyncReply
+retain_stop_error (GstBus *bus, GstMessage *message, gpointer data)
+{
+  GstRuntimeRtpSession *s = data;
+  if (GST_MESSAGE_TYPE (message) != GST_MESSAGE_ERROR)
+    return GST_BUS_PASS;
+  g_mutex_lock (&s->stop_mutex);
+  s->stop_outcome.bus_errors++;
+  g_mutex_unlock (&s->stop_mutex);
+  gst_message_unref (message);
+  return GST_BUS_DROP;
+}
+static void
+stop_handler_released (gpointer data)
+{
+  GstRuntimeRtpSession *s = data;
+  g_mutex_lock (&s->stop_mutex);
+  s->stop_handler_released = TRUE;
+  g_cond_broadcast (&s->stop_done);
+  g_mutex_unlock (&s->stop_mutex);
+}
 void
 gst_runtime_rtp_session_stop (GstRuntimeRtpSession *s)
 {
-  if (s && g_atomic_int_compare_and_exchange (&s->stopped, FALSE, TRUE) && s->pipeline)
+  if (!s)
+    return;
+  g_mutex_lock (&s->stop_mutex);
+  if (!g_atomic_int_compare_and_exchange (&s->stopped, FALSE, TRUE))
+    {
+      g_mutex_unlock (&s->stop_mutex);
+      return;
+    }
+  if (s->pipeline)
+    {
+      /* READY -> NULL otherwise discards the queued errors before the owner
+       * can read them. The private pipeline is never restarted after stop. */
+      gst_pipeline_set_auto_flush_bus (GST_PIPELINE (s->pipeline), FALSE);
+      if (s->bus)
+        gst_bus_set_sync_handler (s->bus, retain_stop_error, s, stop_handler_released);
+    }
+  g_mutex_unlock (&s->stop_mutex);
+  if (s->pipeline)
     {
       if (s->rtx_send)
         gst_element_send_event (s->rtx_send, gst_event_new_flush_start ());
-      gst_element_set_state (s->pipeline, GST_STATE_NULL);
+      s->stop_outcome.state_change = gst_element_set_state (s->pipeline, GST_STATE_NULL);
     }
+  if (s->bus)
+    gst_bus_set_sync_handler (s->bus, NULL, NULL, NULL);
+  g_mutex_lock (&s->stop_mutex);
+  if (s->bus)
+    {
+      GstMessage *message;
+      /* GStreamer's sync handler owns references across in-flight posts.
+       * Its destroy notification means every captured error has been read. */
+      while (!s->stop_handler_released)
+        g_cond_wait (&s->stop_done, &s->stop_mutex);
+      while ((message = gst_bus_pop_filtered (s->bus, GST_MESSAGE_ERROR)))
+        {
+          s->stop_outcome.bus_errors++;
+          gst_message_unref (message);
+        }
+    }
+  s->stop_complete = TRUE;
+  g_cond_broadcast (&s->stop_done);
+  g_mutex_unlock (&s->stop_mutex);
+}
+int
+gst_runtime_rtp_session_close (GstRuntimeRtpSession *s, GstRuntimeRtpStopOutcome *outcome)
+{
+  if (!s || !outcome)
+    return GST_FLOW_ERROR;
+  gst_runtime_rtp_session_stop (s);
+  g_mutex_lock (&s->stop_mutex);
+  while (!s->stop_complete)
+    g_cond_wait (&s->stop_done, &s->stop_mutex);
+  if (s->stop_taken)
+    {
+      g_mutex_unlock (&s->stop_mutex);
+      return GST_FLOW_ERROR;
+    }
+  *outcome = s->stop_outcome;
+  s->stop_taken = TRUE;
+  g_mutex_unlock (&s->stop_mutex);
+  return 0;
 }
 void
 gst_runtime_rtp_session_free (GstRuntimeRtpSession *s)
@@ -592,5 +683,7 @@ gst_runtime_rtp_session_free (GstRuntimeRtpSession *s)
   gst_clear_object (&s->pipeline);
   for (int i = 0; i < 3; i++)
     g_mutex_clear (&s->writers[i]);
+  g_mutex_clear (&s->stop_mutex);
+  g_cond_clear (&s->stop_done);
   g_free (s);
 }

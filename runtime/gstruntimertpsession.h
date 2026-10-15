@@ -91,6 +91,18 @@ int gst_runtime_rtp_session_statistics (GstRuntimeRtpSession *session,
                                         GstRuntimeStatisticVisitor visitor, gpointer user_data);
 GST_API
 void gst_runtime_rtp_session_stop (GstRuntimeRtpSession *session);
+/* Retained by the first stop, including one generic failure per bus error.
+ * state_change is GstStateChangeReturn, including SUCCESS/ASYNC/NO_PREROLL. */
+typedef struct
+{
+  gint state_change;
+  gsize bus_errors;
+} GstRuntimeRtpStopOutcome;
+/* Exclusive owner's one read. Starts stop or waits for its current owner.
+ * 0=read, negative=invalid or already consumed. Cancellation stays void. */
+GST_API
+int gst_runtime_rtp_session_close (GstRuntimeRtpSession *session,
+                                   GstRuntimeRtpStopOutcome *outcome);
 GST_API
 void gst_runtime_rtp_session_free (GstRuntimeRtpSession *session);
 G_END_DECLS
