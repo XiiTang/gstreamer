@@ -18,3 +18,18 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 | [A reply whose proof fails changes no track](runtime/README.md#a-reply-whose-proof-fails-changes-no-track-2026-10-15) | A Digest request's final response changes a track only once its proof is accepted | `runtime/rust/tests/rtsp.rs` `a_reply_whose_digest_proof_fails_changes_no_track` |
 | [H264/H265 dropped RTP extensions](runtime/README.md#h264h265-dropped-rtp-extensions-2026-10-02) | Upstream MR !12389, backported: a dropped FU or NAL clears its delayed header extensions | `runtime/tests/depay_extensions.c` in `runtime/tests/full_native.py` |
 | Rename project integration to Boundless | The runtime crate and build name the project | Builds |
+
+## DTLS timeout failure (issue #63, batch 4)
+
+A failed `DTLSv1_handle_timeout` must publish the connection's failure, just
+as a failed handshake does. All timer work runs through `handle_timeout`;
+it now sets FAILED under the connection lock and uses the existing unlocked
+property notification. Repeated failures do not notify twice.
+
+`runtime/tests/build_dtls.py` builds `dtls_timeout` from the actual connection
+implementation with only OpenSSL's timer operation replaced. `dtls_timeout`
+fails on the previous source (exit 134: CONNECTING instead of FAILED) and
+passes with the patch (exit 0). It checks the public state and notification,
+unlocked delivery, repeated failure, a non-expired timer and a stopped timer.
+The same helper's `dtls_interop` passes (exit 0), including independent
+OpenSSL exporter checks for all three profiles, on macOS arm64.

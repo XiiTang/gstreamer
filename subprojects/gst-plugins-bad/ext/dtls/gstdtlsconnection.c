@@ -421,6 +421,10 @@ handle_timeout (gpointer data, gpointer user_data)
 
     if (ret < 0) {
       GST_WARNING_OBJECT (self, "handling timeout failed");
+      if (priv->connection_state != GST_DTLS_CONNECTION_STATE_FAILED) {
+        priv->connection_state = GST_DTLS_CONNECTION_STATE_FAILED;
+        notify_state = TRUE;
+      }
     } else if (ret > 0) {
       log_state (self, "handling timeout before poll");
       openssl_poll (self, &notify_state, NULL);

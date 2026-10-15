@@ -17,3 +17,4 @@ files=[str(source/(n+'.c')) for n in ['gstdtlsagent','gstdtlscertificate','gstdt
 subprocess.run([*common,'-shared',*files,*libs,'-o',str(a.output/'libgstdtls.dylib')],check=True)
 if (root/'runtime/tests/dtls_interop.c').exists():
  subprocess.run([*common,str(root/'runtime/tests/dtls_interop.c'),*files[:3],*libs,'-o',str(a.output/'dtls_interop')],check=True)
+subprocess.run([*common,str(root/'runtime/tests/dtls_timeout.c'),*files[:2],*libs,'-o',str(a.output/'dtls_timeout')],check=True)
