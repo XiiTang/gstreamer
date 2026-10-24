@@ -111,3 +111,66 @@ fn selected_description_owns_caps_and_enforces_the_negotiated_track() {
     drop(selected);
     assert!(session.statistics().is_ok());
 }
+
+fn feedback_description(feedback: &[String]) -> String {
+    let mut body = String::from("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=feedback\r\nt=0 0\r\n");
+    let formats = (96..128)
+        .map(|pt| pt.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    for _ in 0..4 {
+        body.push_str(&format!("m=audio 5004 RTP/AVP {formats}\r\n"));
+        for pt in 96..128 {
+            body.push_str(&format!("a=rtpmap:{pt} PCMU/8000\r\n"));
+        }
+        for value in feedback {
+            body.push_str(&format!("a=rtcp-fb:* {value}\r\n"));
+        }
+    }
+    body
+}
+
+fn assert_feedback_for_each_format(feedback: Vec<String>) {
+    let body = feedback_description(&feedback);
+    let description = Description::parse(body.as_bytes()).unwrap();
+    assert_eq!(description.media.len(), 4);
+    let keys = feedback
+        .iter()
+        .map(|value| format!("rtcp-fb-{value}"))
+        .collect::<Vec<_>>();
+    for media in &description.media {
+        assert_eq!(media.formats.len(), 32);
+        for (index, format) in media.formats.iter().enumerate() {
+            assert_eq!(format.name, (index + 96).to_string());
+            let parameters = format
+                .parameters
+                .iter()
+                .filter(|(name, _)| name.starts_with("rtcp-fb-"))
+                .collect::<Vec<_>>();
+            assert_eq!(parameters.len(), keys.len());
+            for ((name, value), expected) in parameters.into_iter().zip(&keys) {
+                assert_eq!(name, expected);
+                assert_eq!(value, &Parameter::Boolean(true));
+            }
+        }
+    }
+}
+
+#[test]
+fn media_feedback_is_retained_for_every_format() {
+    assert_feedback_for_each_format(
+        (0..600)
+            .map(|index| format!("x-feedback-{index}"))
+            .collect(),
+    );
+}
+
+#[test]
+fn long_feedback_names_are_retained_for_every_format() {
+    let text = "x".repeat(24_000);
+    assert_feedback_for_each_format(
+        (0..12)
+            .map(|index| format!("x-feedback-{index}-{text}"))
+            .collect(),
+    );
+}

@@ -7,6 +7,7 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 
 | Patch | Why | Regression |
 | --- | --- | --- |
+| [SDP metadata expansion](#sdp-metadata-expansion-driver-plan-rule-20) | Remove b5bc00f5f8's aggregate quotas; the native parser has no aggregate caps-field or byte capacity | `runtime/rust/tests/sdp.rs` feedback expansion regressions, plus the retained independent FFmpeg fixture |
 | [Remove unused RTSP dispatch query](#unused-rtsp-dispatch-query-driver-plan-fork-audit) | Owner-approved removal of b6d8c35a9c; write admission and progress retain their returned `Dispatch` | Rust API and native export probes fail before removal and pass after; native RTSP transport and the whole Rust crate suite |
 | Rust lint prerequisite (issue #63) | Use the existing null-pointer idiom in RTSP message copying and the common `12 + tag` minimum in SRTP validation; behavior is unchanged | With the matching private `BOUNDLESS_MEDIA_PREFIX`, `cargo clippy --manifest-path runtime/rust/Cargo.toml --all-targets --locked -- -D warnings`: pinned base exits 101 for `cmp_null` and `if_same_then_else`; repaired source exits 0 on macOS arm64 |
 | [DTLS-SRTP](runtime/README.md#dtls-srtp) | Keys are exported only after a verified peer, for the declared profiles, from one handshake per connection, and are cleansed after use | `runtime/tests/dtls_interop.c` built by `runtime/tests/build_dtls.py`, against an independent OpenSSL DTLS server; `runtime/tests/dtls_owner.c` |
@@ -100,3 +101,30 @@ RTSP-IO's `rtsp_inbound_and_state_progress_while_outbound_peer_is_not_draining`,
 `bridge_preserves_io_cause_and_later_native_partial_response` and
 `rtsp_close_interrupts_partial_response_and_joins_native_owner`, and RTSP-LATE's
 `a_response_its_operation_stopped_waiting_for_is_an_event`.
+
+## SDP metadata expansion (driver plan Rule 20)
+
+A valid description could become `INVALID` when media × formats × fields
+crossed b5bc00f5f8's aggregate entry or byte quotas. The owner-approved removal
+uses the existing `gst_runtime_sdp_new` checkpoint: the Rust description reader
+always constructs its opaque native description there. The added input metadata
+counter and aggregate caps counters are removed together; the independent FFmpeg
+fixture stays.
+
+Upstream builds a separate caps structure for each format
+(`subprojects/gst-plugins-base/gst-libs/gst/sdp/gstsdpmessage.c:3630-3818`).
+`GstStructure` grows its own field array (`subprojects/gstreamer/gst/gststructure.c:169-228`);
+the pinned GLib 2.86.3 `glib/garray.c:g_ptr_array_maybe_expand` limits a pointer
+array's length, not the total fields or string bytes in its elements. Neither
+provides an aggregate media × formats × fields capacity. The retained input
+bounds already keep format indices below the native array/index capacities;
+removing the cumulative counters leaves no aggregate arithmetic to overflow.
+No replacement quota or failure API is introduced.
+
+`media_feedback_is_retained_for_every_format` and
+`long_feedback_names_are_retained_for_every_format` each exercise four media,
+32 distinct payload types per media, and wildcard feedback attributes copied
+to every format. Both fail with `INVALID` on 2dced6022d (exit 101), rather than
+returning each format's Boolean fields; their assertions retain the complete
+ordered fields and values. `independent_ffmpeg_pcmu_description_retains_actual_payload_mapping`
+continues to check an independently generated description.
