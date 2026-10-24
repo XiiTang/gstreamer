@@ -98,49 +98,6 @@ gst_runtime_payload_caps (const GstRuntimePayloadSettings *s)
     }
   return caps;
 }
-GstRuntimePayload *
-gst_runtime_payload_create (const GstRuntimePayloadSettings *s)
-{
-  GstCaps *caps = gst_runtime_payload_caps (s);
-  if (!caps)
-    return NULL;
-  GError *error = NULL;
-  GstRuntimePayload *result
-      = gst_runtime_payload_new (s->format, s->sending, caps, s->payload_type, s->ssrc, s->sequence,
-                                 s->timestamp, s->mtu, &error);
-  gst_caps_unref (caps);
-  g_clear_error (&error);
-  return result;
-}
-int
-gst_runtime_payload_write (GstRuntimePayload *payload, const guint8 *data, gsize length,
-                           guint64 pts, guint64 duration)
-{
-  if (length > 16 * 1024 * 1024 || (length && !data))
-    return GST_FLOW_ERROR;
-  GstBuffer *buffer = gst_buffer_new_memdup (data, length);
-  GST_BUFFER_PTS (buffer) = pts;
-  GST_BUFFER_DURATION (buffer) = duration;
-  return gst_runtime_payload_push (payload, buffer);
-}
-int
-gst_runtime_payload_read (GstRuntimePayload *payload, guint64 timeout, GstRuntimePayloadFrame **out)
-{
-  *out = NULL;
-  GstSample *sample = gst_runtime_payload_pull (payload, timeout);
-  if (!sample)
-    {
-      GstMessage *error = gst_runtime_payload_error (payload);
-      if (error)
-        {
-          gst_message_unref (error);
-          return GST_FLOW_ERROR;
-        }
-      return 1;
-    }
-  *out = gst_runtime_payload_frame_take (sample);
-  return *out ? 0 : GST_FLOW_ERROR;
-}
 GstRuntimePayloadFrame *
 gst_runtime_payload_frame_take (GstSample *sample)
 {

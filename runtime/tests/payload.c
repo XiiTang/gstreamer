@@ -4,86 +4,6 @@
 #include <gst/rtp/gstrtpbuffer.h>
 #include <string.h>
 
-static GstBuffer *
-buffer (const guint8 *data, gsize length)
-{
-  GstBuffer *value = gst_buffer_new_memdup (data, length);
-  GST_BUFFER_PTS (value) = 0;
-  GST_BUFFER_DURATION (value) = 20 * GST_MSECOND;
-  return value;
-}
-static void
-payload_roundtrip (GstRuntimePayloadFormat format, GstCaps *caps, const guint8 *data, gsize length,
-                   gboolean exact, const gchar *output_path)
-{
-  GError *error = NULL;
-  GstRuntimePayload *send
-      = gst_runtime_payload_new (format, TRUE, caps, 96, 123456, 65530, 0xffff0000, 256, &error);
-  g_assert_no_error (error);
-  g_assert_nonnull (send);
-  g_assert_cmpint (gst_runtime_payload_push (send, buffer (data, length)), ==, GST_FLOW_OK);
-  GstRuntimePayload *receive = NULL;
-  guint count = 0;
-  while (TRUE)
-    {
-      GstSample *sample
-          = gst_runtime_payload_pull (send, count ? 50 * GST_MSECOND : 2 * GST_SECOND);
-      if (!sample)
-        break;
-      if (!receive)
-        {
-          receive = gst_runtime_payload_new (format, FALSE, gst_sample_get_caps (sample), 96, 0, 0,
-                                             0, 256, &error);
-          g_assert_no_error (error);
-          g_assert_nonnull (receive);
-        }
-      GstBuffer *packet = gst_sample_get_buffer (sample);
-      GstRTPBuffer rtp = GST_RTP_BUFFER_INIT;
-      g_assert_true (gst_rtp_buffer_map (packet, GST_MAP_READ, &rtp));
-      g_assert_cmpuint (gst_rtp_buffer_get_ssrc (&rtp), ==, 123456);
-      g_assert_cmpuint (gst_rtp_buffer_get_seq (&rtp), ==, (guint16)(65530 + count));
-      g_assert_cmpuint (gst_buffer_get_size (packet), <=, 256);
-      gst_rtp_buffer_unmap (&rtp);
-      g_assert_cmpint (gst_runtime_payload_push (receive, gst_buffer_ref (packet)), ==,
-                       GST_FLOW_OK);
-      gst_sample_unref (sample);
-      count++;
-    }
-  GstMessage *failure = gst_runtime_payload_error (send);
-  if (failure)
-    {
-      GError *cause = NULL;
-      gst_message_parse_error (failure, &cause, NULL);
-      g_error ("Send failure: %s", cause->message);
-    }
-  g_assert_nonnull (receive);
-  g_assert_cmpuint (count, >, 0);
-  GstSample *decoded = gst_runtime_payload_pull (receive, 2 * GST_SECOND);
-  if (!decoded)
-    {
-      failure = gst_runtime_payload_error (receive);
-      if (failure)
-        {
-          GError *cause = NULL;
-          gst_message_parse_error (failure, &cause, NULL);
-          g_error ("Receive failure: %s", cause->message);
-        }
-    }
-  g_assert_nonnull (decoded);
-  GstMapInfo map;
-  g_assert_true (gst_buffer_map (gst_sample_get_buffer (decoded), &map, GST_MAP_READ));
-  if (exact)
-    g_assert_cmpmem (data, length, map.data, map.size);
-  if (output_path)
-    g_assert_true (g_file_set_contents (output_path, (gchar *)map.data, map.size, &error));
-  g_assert_no_error (error);
-  gst_buffer_unmap (gst_sample_get_buffer (decoded), &map);
-  gst_sample_unref (decoded);
-  gst_runtime_payload_free (send);
-  gst_runtime_payload_free (receive);
-  g_print ("PASS payload %u: %u RTP packets, sequence wrap, bounded MTU, recovered frame\n", format,
-           count);
-}
 static void
 session_roundtrip (GstRuntimePayloadFormat format, const guint8 *data, gsize length, gboolean exact,
                    const gchar *output_path)
@@ -278,72 +198,40 @@ jitter_byte_pressure_stop (void)
   g_free (packet);
   g_print ("PASS equal-timestamp jitter byte pressure and joined stop\n");
 }
-typedef struct
-{
-  GstRuntimePayload *payload;
-  gint count;
-  GstFlowReturn result;
-} BlockedPush;
-static gpointer
-blocked_push (gpointer value)
-{
-  BlockedPush *push = value;
-  const guint8 bytes[160] = { 0 };
-  for (guint i = 0; i < 10000; i++)
-    {
-      push->result = gst_runtime_payload_push (push->payload, buffer (bytes, sizeof (bytes)));
-      if (push->result != GST_FLOW_OK)
-        break;
-      g_atomic_int_inc (&push->count);
-    }
-  return NULL;
-}
 static void
 raw_and_stop (void)
 {
-  GError *error = NULL;
-  GstCaps *caps = gst_caps_new_simple ("application/x-rtp", "media", G_TYPE_STRING, "audio",
-                                       "clock-rate", G_TYPE_INT, 8000, "encoding-name",
-                                       G_TYPE_STRING, "PCMU", "payload", G_TYPE_INT, 0, NULL);
-  GstRuntimePayload *raw
-      = gst_runtime_payload_new (GST_RUNTIME_PAYLOAD_RAW, TRUE, caps, 0, 0, 0, 0, 1200, &error);
-  g_assert_no_error (error);
+  GstRuntimeRtpSettings settings
+      = { .ssrc = 0x05060708, .payload_type = 0, .clock_rate = 8000 };
+  GstRuntimeRtpSession *raw = gst_runtime_rtp_session_new (&settings);
   g_assert_nonnull (raw);
   const guint8 packet[] = { 0x80, 0, 0xff, 0xff, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0xff, 0, 1 };
-  g_assert_cmpint (gst_runtime_payload_push (raw, buffer (packet, sizeof (packet))), ==,
-                   GST_FLOW_OK);
-  GstSample *sample = gst_runtime_payload_pull (raw, GST_SECOND);
-  g_assert_nonnull (sample);
-  guint8 got[sizeof (packet)];
-  g_assert_cmpuint (gst_buffer_extract (gst_sample_get_buffer (sample), 0, got, sizeof (got)), ==,
-                    sizeof (got));
-  g_assert_cmpmem (packet, sizeof (packet), got, sizeof (got));
-  gst_sample_unref (sample);
+  g_assert_cmpint (gst_runtime_rtp_session_try_write (raw, 0, packet, sizeof (packet)), ==, 0);
+  GstRuntimePayloadFrame *frame = NULL;
+  g_assert_cmpint (gst_runtime_rtp_session_pull (raw, 0, GST_SECOND, &frame), ==, 0);
+  GstRuntimePayloadFrameView view;
+  gst_runtime_payload_frame_view (frame, &view);
+  g_assert_cmpmem (packet, sizeof (packet), view.data, view.length);
+  gst_runtime_payload_frame_free (frame);
   const guint8 invalid[12] = { 0 };
-  g_assert_cmpint (gst_runtime_payload_push (raw, buffer (invalid, sizeof (invalid))), ==,
-                   GST_FLOW_ERROR);
-  gst_runtime_payload_free (raw);
-  gst_caps_unref (caps);
-  caps = gst_caps_new_simple ("audio/x-mulaw", "rate", G_TYPE_INT, 8000, "channels", G_TYPE_INT, 1,
-                              NULL);
-  BlockedPush push = { .payload = gst_runtime_payload_new (GST_RUNTIME_PAYLOAD_PCMU, TRUE, caps, 0,
-                                                           99, 0, 0, 1200, &error) };
-  g_assert_no_error (error);
-  gst_caps_unref (caps);
-  GThread *worker = g_thread_new ("bounded-payload", blocked_push, &push);
-  gint64 deadline = g_get_monotonic_time () + G_USEC_PER_SEC;
-  while (g_atomic_int_get (&push.count) < 8 && g_get_monotonic_time () < deadline)
-    g_usleep (1000);
-  g_usleep (20000);
-  g_assert_cmpint (g_atomic_int_get (&push.count), <, 10000);
-  gint64 start = g_get_monotonic_time ();
-  gst_runtime_payload_stop (push.payload);
-  g_thread_join (worker);
-  g_assert_cmpint (g_get_monotonic_time () - start, <, 200000);
-  g_assert_cmpint (push.result, ==, GST_FLOW_FLUSHING);
-  gst_runtime_payload_free (push.payload);
-  g_print (
-      "PASS raw RTP exact bytes, malformed RTP rejection, bounded backpressure and joined stop\n");
+  g_assert_cmpint (gst_runtime_rtp_session_try_write (raw, 0, invalid, sizeof (invalid)), <, 0);
+  int result;
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  do
+    {
+      result = gst_runtime_rtp_session_try_write (raw, 0, packet, sizeof (packet));
+      g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+    }
+  while (result == 0);
+  g_assert_cmpint (result, ==, 1);
+  gst_runtime_rtp_session_stop (raw);
+  g_assert_cmpint (gst_runtime_rtp_session_try_write (raw, 0, packet, sizeof (packet)), <, 0);
+  GstRuntimeRtpStopOutcome outcome;
+  g_assert_cmpint (gst_runtime_rtp_session_close (raw, &outcome), ==, 0);
+  g_assert_cmpint (outcome.state_change, !=, GST_STATE_CHANGE_FAILURE);
+  g_assert_cmpuint (outcome.bus_errors, ==, 0);
+  gst_runtime_rtp_session_free (raw);
+  g_print ("PASS shared RTP session raw bytes, malformed rejection, input pressure and joined stop\n");
 }
 
 static void
@@ -354,26 +242,29 @@ jpeg_rejection (const gchar *directory)
   gsize length;
   GError *error = NULL;
   g_assert_true (g_file_get_contents (path, &data, &length, &error));
-  GstCaps *caps
-      = gst_caps_new_simple ("image/jpeg", "width", G_TYPE_INT, 64, "height", G_TYPE_INT, 64, NULL);
-  GstRuntimePayload *send
-      = gst_runtime_payload_new (GST_RUNTIME_PAYLOAD_JPEG, TRUE, caps, 96, 123, 0, 0, 1200, &error);
   g_assert_no_error (error);
+  GstRuntimePayloadSettings codec = { .format = GST_RUNTIME_PAYLOAD_JPEG,
+                                       .payload_type = 96,
+                                       .ssrc = 123,
+                                       .mtu = 1200,
+                                       .clock_rate = 90000,
+                                       .channels = 1,
+                                       .width = 64,
+                                       .height = 64 };
+  GstRuntimeRtpSettings settings
+      = { .ssrc = 123, .payload_type = 96, .clock_rate = 90000, .payload = &codec };
+  GstRuntimeRtpSession *send = gst_runtime_rtp_session_new (&settings);
   g_assert_nonnull (send);
-  g_assert_cmpint (gst_runtime_payload_push (send, buffer ((guint8 *)data, length)), ==,
-                   GST_FLOW_OK);
-  g_assert_null (gst_runtime_payload_pull (send, GST_SECOND));
-  GstMessage *failure = gst_runtime_payload_error (send);
-  g_assert_nonnull (failure);
-  gst_message_parse_error (failure, &error, NULL);
-  g_assert_nonnull (strstr (error->message, "Huffman"));
-  g_clear_error (&error);
-  gst_message_unref (failure);
-  gst_runtime_payload_free (send);
-  gst_caps_unref (caps);
+  g_assert_cmpint (gst_runtime_rtp_session_try_write_frame (send, (guint8 *)data, length, 0,
+                                                          GST_CLOCK_TIME_NONE),
+                   ==, 0);
+  GstRuntimePayloadFrame *frame = NULL;
+  g_assert_cmpint (gst_runtime_rtp_session_pull (send, 0, 5 * GST_SECOND, &frame), <, 0);
+  g_assert_null (frame);
+  gst_runtime_rtp_session_free (send);
   g_free (path);
   g_free (data);
-  g_print ("PASS optimized JPEG rejected before emitting a corrupt RTP frame\n");
+  g_print ("PASS shared RTP session rejects optimized JPEG before emitting a corrupt packet\n");
 }
 
 int
@@ -386,21 +277,9 @@ main (int argc, char **argv)
   guint8 audio[160];
   for (guint i = 0; i < 160; i++)
     audio[i] = (guint8)i;
-  GstCaps *caps = gst_caps_new_simple ("audio/x-alaw", "rate", G_TYPE_INT, 8000, "channels",
-                                       G_TYPE_INT, 1, NULL);
-  payload_roundtrip (GST_RUNTIME_PAYLOAD_PCMA, caps, audio, sizeof (audio), TRUE, NULL);
   session_roundtrip (GST_RUNTIME_PAYLOAD_PCMA, audio, sizeof (audio), TRUE, NULL);
-  gst_caps_unref (caps);
-  caps = gst_caps_new_simple ("audio/x-mulaw", "rate", G_TYPE_INT, 8000, "channels", G_TYPE_INT, 1,
-                              NULL);
-  payload_roundtrip (GST_RUNTIME_PAYLOAD_PCMU, caps, audio, sizeof (audio), TRUE, NULL);
-  gst_caps_unref (caps);
   session_roundtrip (GST_RUNTIME_PAYLOAD_PCMU, audio, sizeof (audio), TRUE, NULL);
   const guint8 opus[] = { 0xf8, 0xff, 0xfe };
-  caps = gst_caps_new_simple ("audio/x-opus", "rate", G_TYPE_INT, 48000, "channels", G_TYPE_INT, 2,
-                              "channel-mapping-family", G_TYPE_INT, 0, NULL);
-  payload_roundtrip (GST_RUNTIME_PAYLOAD_OPUS, caps, opus, sizeof (opus), TRUE, NULL);
-  gst_caps_unref (caps);
   session_roundtrip (GST_RUNTIME_PAYLOAD_OPUS, opus, sizeof (opus), TRUE, NULL);
   const gchar *names[] = { "h264", "h265", "jpeg", "aac" };
   const GstRuntimePayloadFormat formats[] = { GST_RUNTIME_PAYLOAD_H264, GST_RUNTIME_PAYLOAD_H265,
@@ -412,27 +291,8 @@ main (int argc, char **argv)
       GError *error = NULL;
       g_assert_true (g_file_get_contents (input, &encoded, &length, &error));
       g_assert_no_error (error);
-      if (i < 2)
-        caps = gst_caps_new_simple (i == 0 ? "video/x-h264" : "video/x-h265", "stream-format",
-                                    G_TYPE_STRING, "byte-stream", "alignment", G_TYPE_STRING, "au",
-                                    NULL);
-      else if (i == 2)
-        caps = gst_caps_new_simple ("image/jpeg", "width", G_TYPE_INT, 64, "height", G_TYPE_INT, 64,
-                                    NULL);
-      else
-        {
-          const guint8 asc[] = { 0x12, 0x10 };
-          GstBuffer *configuration = gst_buffer_new_memdup (asc, 2);
-          caps = gst_caps_new_simple ("audio/mpeg", "mpegversion", G_TYPE_INT, 4, "stream-format",
-                                      G_TYPE_STRING, "raw", "rate", G_TYPE_INT, 44100, "channels",
-                                      G_TYPE_INT, 2, "codec_data", GST_TYPE_BUFFER, configuration,
-                                      NULL);
-          gst_buffer_unref (configuration);
-        }
       gchar *output = g_strconcat (input, ".recovered", NULL);
-      payload_roundtrip (formats[i], caps, (guint8 *)encoded, length, i == 3, output);
       session_roundtrip (formats[i], (guint8 *)encoded, length, i == 3, output);
-      gst_caps_unref (caps);
       g_free (encoded);
       g_free (input);
       g_free (output);

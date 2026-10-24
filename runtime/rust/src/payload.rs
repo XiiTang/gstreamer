@@ -1,12 +1,7 @@
-//! Typed encoded-frame/RTP transformation. Dropping the control owner stops
-//! blocked input/output; callers join their workers before releasing resources.
+//! Typed payload configuration and frame views for the exclusive RTP Session.
 use std::{
-    cell::Cell,
     ffi::{CString, c_char, c_void},
-    marker::PhantomData,
     ptr::NonNull,
-    sync::Arc,
-    time::Duration,
 };
 #[repr(i32)]
 #[derive(Clone, Copy, Debug)]
@@ -39,7 +34,7 @@ pub struct Configuration<'a> {
     pub h265_pps: &'a str,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
+pub(crate) enum Error {
     Configuration,
     Flow(i32),
 }
@@ -81,73 +76,14 @@ struct FrameView {
     duration: u64,
 }
 unsafe extern "C" {
-    fn gst_runtime_payload_create(settings: *const Settings) -> *mut c_void;
-    fn gst_runtime_payload_write(
-        payload: *mut c_void,
-        data: *const u8,
-        length: usize,
-        pts: u64,
-        duration: u64,
-    ) -> i32;
-    fn gst_runtime_payload_read(payload: *mut c_void, timeout: u64, frame: *mut *mut c_void)
-    -> i32;
     fn gst_runtime_payload_frame_view(frame: *mut c_void, view: *mut FrameView);
     fn gst_runtime_payload_frame_free(frame: *mut c_void);
-    fn gst_runtime_payload_stop(payload: *mut c_void);
-    fn gst_runtime_payload_free(payload: *mut c_void);
-}
-struct Inner(NonNull<c_void>);
-// Native appsrc/appsink permit one producer and one consumer concurrently with
-// state transition to NULL. Exclusive handles enforce the producer/consumer rule.
-unsafe impl Send for Inner {}
-unsafe impl Sync for Inner {}
-impl Drop for Inner {
-    fn drop(&mut self) {
-        unsafe { gst_runtime_payload_free(self.0.as_ptr()) };
-    }
-}
-pub struct Control(Arc<Inner>);
-impl Control {
-    pub fn stop(&self) {
-        unsafe { gst_runtime_payload_stop(self.0.0.as_ptr()) };
-    }
-}
-impl Drop for Control {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-pub struct Input {
-    inner: Arc<Inner>,
-    _exclusive: PhantomData<Cell<()>>,
-}
-pub struct Output {
-    inner: Arc<Inner>,
-    _exclusive: PhantomData<Cell<()>>,
 }
 #[derive(Debug)]
 pub struct Frame {
     pub data: Vec<u8>,
     pub pts: Option<u64>,
     pub duration: Option<u64>,
-}
-pub fn open(c: &Configuration<'_>) -> Result<(Control, Input, Output), Error> {
-    crate::initialize();
-    let raw = with_settings(c, |settings| unsafe {
-        gst_runtime_payload_create(settings)
-    })?;
-    let inner = Arc::new(Inner(NonNull::new(raw).ok_or(Error::Configuration)?));
-    Ok((
-        Control(inner.clone()),
-        Input {
-            inner: inner.clone(),
-            _exclusive: PhantomData,
-        },
-        Output {
-            inner,
-            _exclusive: PhantomData,
-        },
-    ))
 }
 pub(crate) fn with_settings<T>(
     c: &Configuration<'_>,
@@ -179,55 +115,12 @@ pub(crate) fn with_settings<T>(
     };
     Ok(use_settings(&settings))
 }
-impl Input {
-    pub fn push(
-        &mut self,
-        bytes: &[u8],
-        pts: Option<u64>,
-        duration: Option<u64>,
-    ) -> Result<(), Error> {
-        let code = unsafe {
-            gst_runtime_payload_write(
-                self.inner.0.as_ptr(),
-                bytes.as_ptr(),
-                bytes.len(),
-                pts.unwrap_or(u64::MAX),
-                duration.unwrap_or(u64::MAX),
-            )
-        };
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(Error::Flow(code))
-        }
-    }
-}
 struct NativeFrame(NonNull<c_void>);
 impl Drop for NativeFrame {
     fn drop(&mut self) {
         unsafe { gst_runtime_payload_frame_free(self.0.as_ptr()) };
     }
 }
-impl Output {
-    pub fn pull(&mut self, timeout: Duration) -> Result<Option<Frame>, Error> {
-        let mut frame = std::ptr::null_mut();
-        let code = unsafe {
-            gst_runtime_payload_read(
-                self.inner.0.as_ptr(),
-                timeout.as_nanos().min(u64::MAX as u128) as u64,
-                &mut frame,
-            )
-        };
-        if code == 1 {
-            return Ok(None);
-        }
-        if code != 0 {
-            return Err(Error::Flow(code));
-        }
-        unsafe { take_frame(frame) }.map(Some)
-    }
-}
-
 /// Takes the native sample lease, copies its public media bytes, then unmaps.
 pub(crate) unsafe fn take_frame(raw: *mut c_void) -> Result<Frame, Error> {
     let frame = NativeFrame(NonNull::new(raw).ok_or(Error::Flow(-5))?);

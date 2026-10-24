@@ -7,6 +7,7 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 
 | Patch | Why | Regression |
 | --- | --- | --- |
+| [Payload transforms through the RTP Session](#payload-transforms-through-the-rtp-session) | Split eac7272d01: keep shared typed settings, factories and frames; retire the unused standalone owner and ABI | Production Session frame/raw/pressure regressions and seven native format round trips, with independent FFmpeg pixels |
 | [SDP metadata expansion](#sdp-metadata-expansion-driver-plan-rule-20) | Remove b5bc00f5f8's aggregate quotas; the native parser has no aggregate caps-field or byte capacity | `runtime/rust/tests/sdp.rs` feedback expansion regressions, plus the retained independent FFmpeg fixture |
 | [Remove unused RTSP dispatch query](#unused-rtsp-dispatch-query-driver-plan-fork-audit) | Owner-approved removal of b6d8c35a9c; write admission and progress retain their returned `Dispatch` | Rust API and native export probes fail before removal and pass after; native RTSP transport and the whole Rust crate suite |
 | Rust lint prerequisite (issue #63) | Use the existing null-pointer idiom in RTSP message copying and the common `12 + tag` minimum in SRTP validation; behavior is unchanged | With the matching private `BOUNDLESS_MEDIA_PREFIX`, `cargo clippy --manifest-path runtime/rust/Cargo.toml --all-targets --locked -- -D warnings`: pinned base exits 101 for `cmp_null` and `if_same_then_else`; repaired source exits 0 on macOS arm64 |
@@ -128,3 +129,30 @@ to every format. Both fail with `INVALID` on 2dced6022d (exit 101), rather than
 returning each format's Boolean fields; their assertions retain the complete
 ordered fields and values. `independent_ffmpeg_pcmu_description_retains_actual_payload_mapping`
 continues to check an independently generated description.
+
+## Payload transforms through the RTP Session
+
+The owner-approved split of eac7272d01 keeps `payload::Configuration`, `Format`
+and `Frame`, their internal settings/frame conversion, and the native caps,
+transform and frame helpers used by the production `rtp::Session` and
+58029c7101. The helper error type becomes crate-private because no public
+payload operation remains. The unused `payload::open`, Control/Input/Output
+and their native create/write/read/stop/free owner path are removed; native
+standalone new/push/pull/error/stop/free and the pipeline they owned have no
+remaining production caller either.
+
+Upstream's `rtpbin::create_session` creates and owns each RTP session
+(`subprojects/gst-plugins-good/gst/rtpmanager/gstrtpbin.c:753-788`). The production
+`gst_runtime_rtp_session_new` already owns its codec elements, built by the
+retained shared `gst_runtime_payload_transform_new`; no second pipeline owner
+is needed. Shared
+caps and `gst_runtime_payload_frame_take/view/free` stay unchanged.
+
+`runtime/rust/tests/payload.rs` now checks encoded PCMA/PCMU round trips,
+sequence wrap, exact raw RTP, malformed input, pressure and cancellation through
+`rtp::Session`. Both production Session regressions pass before removal on
+2dced6022d (exit 0). `runtime/tests/payload.c` keeps seven Session codec round
+trips, timestamps, MTU/SSRC/sequence checks, access-unit rejection, jitter pressure,
+optimized-JPEG rejection before output and raw RTP/stop checks. Shared checks
+formerly exercised by the standalone owner move to that Session path. The full
+native harness retains independent FFmpeg pixel checks for its recovered frames.

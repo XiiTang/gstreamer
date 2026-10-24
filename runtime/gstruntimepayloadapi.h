@@ -20,15 +20,6 @@ typedef struct
 } GstRuntimePayloadFrameView;
 GST_API
 GstCaps *gst_runtime_payload_caps (const GstRuntimePayloadSettings *settings);
-GST_API
-GstRuntimePayload *gst_runtime_payload_create (const GstRuntimePayloadSettings *settings);
-GST_API
-int gst_runtime_payload_write (GstRuntimePayload *payload, const guint8 *data, gsize length,
-                               guint64 pts, guint64 duration);
-/* 0=sample, 1=no sample within timeout, negative=native flow/error. */
-GST_API
-int gst_runtime_payload_read (GstRuntimePayload *payload, guint64 timeout,
-                              GstRuntimePayloadFrame **frame);
 /* Takes ownership of sample, including on failure. */
 GST_API
 GstRuntimePayloadFrame *gst_runtime_payload_frame_take (GstSample *sample);

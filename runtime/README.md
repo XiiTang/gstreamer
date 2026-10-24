@@ -42,9 +42,11 @@ only on a response; a connection that ends leaves it as its last response confir
 The opaque `gstruntimeapi` ABI and `rust` crate give the Runtime an exclusive
 movable owner and a separately shareable cancellation handle.
 
-`gstruntimepayload` transforms encoded H264/H265/JPEG/Opus/MPEG4-GENERIC AAC/PCMA/
-PCMU frames and raw RTP using bounded appsrc/appsink queues. There is no encoder,
-decoder, player or arbitrary pipeline expression. RFC 2435 JPEG requires standard
+The shared RTP Session uses `gstruntimepayload` helpers to transform encoded
+H264/H265/JPEG/Opus/MPEG4-GENERIC AAC/PCMA/PCMU frames and raw RTP through its
+bounded appsrc/appsink ports. The Rust `payload` module supplies Configuration,
+Format and Frame; the exclusive `rtp::Session` owns admission, reads and stop.
+There is no encoder, decoder, player or arbitrary pipeline expression. RFC 2435 JPEG requires standard
 Huffman tables and its representable single scan; other input is rejected before
 output instead of silently changing decoded pixels.
 
@@ -65,7 +67,7 @@ linkable symbol must not enable calls unavailable on the deployment OS.
 
 `tests/full_native.py` links the actual private artifact and tests RTSP, all seven
 payload formats, raw RTP, backpressure and joined stop. FFmpeg independently
-encodes the fixtures and decodes recovered H264/H265/JPEG for exact pixel checks.
+encodes the fixtures and decodes the Session's recovered H264/H265/JPEG for exact pixel checks.
 Optimized JPEG tables are a negative test. `BOUNDLESS_MEDIA_PREFIX=<private-prefix>
 cargo test --manifest-path runtime/rust/Cargo.toml` checks the safe owner ABI,
 repeated extension headers, binary bodies and cancellation with raw evidence.
