@@ -1,7 +1,7 @@
 mod authentication;
 mod keepalive;
 use crate::{Error, ffi, initialize};
-pub use authentication::{Credential, Observation};
+pub use authentication::{Credential, CredentialCallback, Observation};
 pub use keepalive::{
     Keepalive, KeepaliveCancellation, KeepaliveEvent, KeepaliveEventKind, KeepaliveMethod,
     KeepaliveStatus, MaintenanceFailure,
@@ -225,6 +225,22 @@ impl Rtsp {
         self.authentication = Some(authentication);
         Ok(())
     }
+    /// Acquires a credential once per authentication exchange, including keepalives.
+    /// A challenge answer uses the generation acquired for its original request.
+    /// `basic` fixes the mechanism and applies the ordinary RTSP transport rule.
+    pub fn configure_authentication_callback(
+        &mut self,
+        acquire: CredentialCallback,
+        basic: bool,
+        tls: bool,
+    ) -> Result<(), Error> {
+        if self.authentication.is_some() || (basic && !tls && !matches!(self.version, Version::V1))
+        {
+            return Err(Error::AUTHENTICATION);
+        }
+        self.authentication = Some(authentication::Authentication::callback(acquire, basic));
+        Ok(())
+    }
     /// Takes a complete response read from the native client: a 401 the
     /// owner answers names the CSeq its request is sent again as, and that
     /// request begins as soon as the writer is free; a reply to a Digest
@@ -350,6 +366,18 @@ impl Rtsp {
         };
         if auth.busy() {
             return (Ok(false), Dispatch::default());
+        }
+        if auth.acquires() {
+            // Share native request_mode's writer-first admission checkpoint.
+            // Fixed credentials retain their existing validation behavior.
+            let admission =
+                unsafe { ffi::gst_runtime_rtsp_request_admission(self.inner.0.as_ptr()) };
+            if admission == 1 {
+                return (Ok(false), Dispatch::default());
+            }
+            if let Err(error) = Error::check(admission) {
+                return (Err(error), Dispatch::default());
+            }
         }
         let request = match auth.request(method, uri, headers, body) {
             Ok(request) => request,

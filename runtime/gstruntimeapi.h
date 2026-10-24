@@ -96,6 +96,7 @@ int gst_runtime_rtsp_send_data_begin (GstRuntimeRtsp *client, guint8 channel, co
 GST_API void gst_runtime_rtsp_invalidate (GstRuntimeRtsp *client);
 GST_API int gst_runtime_rtsp_hold_response (GstRuntimeRtsp *client);
 GST_API int gst_runtime_rtsp_take_response (GstRuntimeRtsp *client, GstRuntimeRtspMessage *message);
+GST_API int gst_runtime_rtsp_request_admission (GstRuntimeRtsp *client);
 GST_API int gst_runtime_rtsp_request_ready (GstRuntimeRtsp *client);
 GST_API int gst_runtime_rtsp_session_active (GstRuntimeRtsp *client, const char *session);
 G_END_DECLS

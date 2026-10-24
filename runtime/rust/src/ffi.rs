@@ -69,6 +69,7 @@ unsafe extern "C" {
     pub fn gst_runtime_rtsp_invalidate(client: *mut c_void);
     pub fn gst_runtime_rtsp_hold_response(client: *mut c_void) -> c_int;
     pub fn gst_runtime_rtsp_take_response(client: *mut c_void, message: *mut c_void) -> c_int;
+    pub fn gst_runtime_rtsp_request_admission(client: *mut c_void) -> i32;
     pub fn gst_runtime_rtsp_request_ready(client: *mut c_void) -> i32;
     pub fn gst_runtime_initialize();
     pub fn gst_runtime_rtsp_request_begin(

@@ -13,6 +13,7 @@ use http_auth::{
 use zeroize::Zeroizing;
 
 /// What a connection authenticates its requests with.
+#[derive(Clone)]
 pub enum Credential {
     /// A Basic `Authorization` value, sent with every request. RTSP 2.0
     /// carries it only over TLS (RFC 7826 section 19.1).
@@ -47,6 +48,8 @@ pub(super) struct Sent {
     pub(super) body: Vec<u8>,
     /// Already sent again: a 401 to it is the response.
     answered: bool,
+    /// One generation for this exchange, including its challenge answer.
+    credential: Credential,
 }
 
 /// A request as it is sent: its headers with the credential's
@@ -74,8 +77,20 @@ struct InFlight {
     proof: Option<ServerProof>,
 }
 
+/// Supplies one credential generation at the start of each request's authentication
+/// exchange. A challenge answer and its server proof keep that same generation.
+pub type CredentialCallback = Box<dyn FnMut() -> Result<Credential, Error> + Send>;
+
+enum Source {
+    Fixed(Credential),
+    Callback {
+        acquire: CredentialCallback,
+        basic: bool,
+    },
+}
+
 pub(super) struct Authentication {
-    credential: Credential,
+    source: Source,
     session: DigestSession,
     /// The Digest request in flight.
     in_flight: Option<InFlight>,
@@ -96,7 +111,7 @@ impl Authentication {
             return Err(Error::AUTHENTICATION);
         }
         Ok(Self {
-            credential,
+            source: Source::Fixed(credential),
             // An RTSP owner holds every request and reply body whole.
             session: DigestSession::new(true),
             in_flight: None,
@@ -104,8 +119,23 @@ impl Authentication {
             writing: false,
         })
     }
+    pub(super) fn callback(acquire: CredentialCallback, basic: bool) -> Self {
+        Self {
+            source: Source::Callback { acquire, basic },
+            session: DigestSession::new(true),
+            in_flight: None,
+            due: None,
+            writing: false,
+        }
+    }
+    pub(super) fn acquires(&self) -> bool {
+        matches!(self.source, Source::Callback { .. })
+    }
     pub(super) fn is_basic(&self) -> bool {
-        matches!(self.credential, Credential::Basic(_))
+        match &self.source {
+            Source::Fixed(credential) => matches!(credential, Credential::Basic(_)),
+            Source::Callback { basic, .. } => *basic,
+        }
     }
     /// A Digest request is in flight: its final response is held natively.
     pub(super) fn holds(&self) -> bool {
@@ -136,7 +166,26 @@ impl Authentication {
                 .map(|(name, value)| ((*name).to_owned(), Zeroizing::new((*value).to_owned())))
                 .collect::<Vec<_>>()
         };
-        if let Credential::Basic(value) = &self.credential {
+        let credential = match &mut self.source {
+            Source::Fixed(credential) => credential.clone(),
+            Source::Callback { acquire, basic } => {
+                let credential = acquire()?;
+                if matches!(credential, Credential::Basic(_)) != *basic {
+                    return Err(Error::AUTHENTICATION);
+                }
+                credential
+            }
+        };
+        let fits = match &credential {
+            Credential::Basic(value) => value.len() <= 65536,
+            Credential::Digest { username, password } => {
+                username.len() <= 65536 && password.len() <= 65536
+            }
+        };
+        if !fits {
+            return Err(Error::AUTHENTICATION);
+        }
+        if let Credential::Basic(value) = &credential {
             let mut headers = owned();
             headers.push(("Authorization".into(), value.clone()));
             return Ok(Authorized {
@@ -150,11 +199,12 @@ impl Authentication {
             headers: owned(),
             body: body.to_vec(),
             answered: false,
+            credential,
         })
     }
     /// `sent` with the Digest session's answer, once a challenge was adopted.
     fn digest(&mut self, sent: Sent) -> Result<Authorized, Error> {
-        let Credential::Digest { username, password } = &self.credential else {
+        let Credential::Digest { username, password } = &sent.credential else {
             unreachable!("only a Digest connection answers a challenge");
         };
         let answer = self
@@ -253,5 +303,88 @@ impl Authentication {
     pub(super) fn keep_due(&mut self, request: Authorized, sequence: u32) {
         let (sent, _) = request.kept.expect("a due request is kept");
         self.due = Some((sent, sequence));
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_committed_generation_reaches_the_next_exchange() {
+        let current = Arc::new(Mutex::new("Basic first".to_owned()));
+        let values = current.clone();
+        let mut auth = Authentication::callback(
+            Box::new(move || {
+                Ok(Credential::Basic(Zeroizing::new(
+                    values.lock().unwrap().clone(),
+                )))
+            }),
+            true,
+        );
+        let first = auth
+            .request("OPTIONS", "rtsp://camera/test", &[], &[])
+            .unwrap();
+        assert_eq!(first.headers()[0].1, "Basic first");
+        *current.lock().unwrap() = "Basic second".into();
+        let next = auth
+            .request("OPTIONS", "rtsp://camera/test", &[], &[])
+            .unwrap();
+        assert_eq!(next.headers()[0].1, "Basic second");
+    }
+
+    #[test]
+    fn each_exchange_acquires_the_current_generation_and_its_answer_keeps_it() {
+        let current = Arc::new(Mutex::new("first".to_owned()));
+        let reads = Arc::new(Mutex::new(0));
+        let (values, acquired) = (current.clone(), reads.clone());
+        let mut auth = Authentication::callback(
+            Box::new(move || {
+                *acquired.lock().unwrap() += 1;
+                Ok(Credential::Digest {
+                    username: Zeroizing::new("user".into()),
+                    password: Zeroizing::new(values.lock().unwrap().clone()),
+                })
+            }),
+            false,
+        );
+        let first = auth
+            .request("OPTIONS", "rtsp://camera/test", &[], &[])
+            .unwrap();
+        assert!(auth.dispatched(first, 1));
+        *current.lock().unwrap() = "second".into();
+        let mut challenge = Message {
+            kind: 2,
+            status: 401,
+            channel: 0,
+            version: 2,
+            method: None,
+            uri: None,
+            reason: None,
+            body: vec![],
+            raw: vec![],
+            authentication: None,
+            headers: vec![(
+                b"WWW-Authenticate".to_vec(),
+                b"Digest realm=\"camera\",nonce=\"one\",algorithm=SHA-256,qop=\"auth\"".to_vec(),
+            )],
+        };
+        auth.received(&mut challenge).unwrap();
+        let (answer, _) = auth.take_due().unwrap().unwrap();
+        let sent = answer.kept().unwrap();
+        let Credential::Digest { password, .. } = &sent.credential else {
+            panic!("Digest")
+        };
+        assert_eq!(password.as_str(), "first");
+        assert_eq!(*reads.lock().unwrap(), 1);
+        let next = auth
+            .request("OPTIONS", "rtsp://camera/test", &[], &[])
+            .unwrap();
+        let Credential::Digest { password, .. } = &next.kept().unwrap().credential else {
+            panic!("Digest")
+        };
+        assert_eq!(password.as_str(), "second");
+        assert_eq!(*reads.lock().unwrap(), 2);
     }
 }

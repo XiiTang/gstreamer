@@ -7,6 +7,7 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 
 | Patch | Why | Regression |
 | --- | --- | --- |
+| [RTSP credential generations](#rtsp-credential-generations) | A connection can acquire current credentials for each authentication exchange while keeping one generation through a Digest challenge | `rtsp::authentication::generation_tests`, the Rust RTSP and keepalive suites |
 | [Payload transforms through the RTP Session](#payload-transforms-through-the-rtp-session) | Split eac7272d01: keep shared typed settings, factories and frames; retire the unused standalone owner and ABI | Production Session frame/raw/pressure regressions and seven native format round trips, with independent FFmpeg pixels |
 | [SDP metadata expansion](#sdp-metadata-expansion-driver-plan-rule-20) | Remove b5bc00f5f8's aggregate quotas; the native parser has no aggregate caps-field or byte capacity | `runtime/rust/tests/sdp.rs` feedback expansion regressions, plus the retained independent FFmpeg fixture |
 | [Remove unused RTSP dispatch query](#unused-rtsp-dispatch-query-driver-plan-fork-audit) | Owner-approved removal of b6d8c35a9c; write admission and progress retain their returned `Dispatch` | Rust API and native export probes fail before removal and pass after; native RTSP transport and the whole Rust crate suite |
@@ -156,3 +157,29 @@ trips, timestamps, MTU/SSRC/sequence checks, access-unit rejection, jitter press
 optimized-JPEG rejection before output and raw RTP/stop checks. Shared checks
 formerly exercised by the standalone owner move to that Session path. The full
 native harness retains independent FFmpeg pixel checks for its recovered frames.
+
+## RTSP credential generations
+
+A fixed connection credential prevented a caller's renewed value from reaching
+later authentication exchanges. `configure_authentication_callback` supplies a
+credential at `Authentication::request`, the checkpoint used by ordinary
+requests and native keepalives. A Digest request owns that acquired credential
+through its challenge answer; nonce state stays with the authentication owner.
+No callback is invoked for the answer. Without a callback, fixed-credential
+behavior and the existing transport restrictions are unchanged.
+
+On macOS arm64, the regression fixture using db8bcea522's existing fixed-source
+constructor fails (exit 101): the next request carries `Basic first` after the
+issuing value changes to `Basic second`. The callback fixture
+`a_committed_generation_reaches_the_next_exchange` passes, and
+`each_exchange_acquires_the_current_generation_and_its_answer_keeps_it` proves
+one acquisition through a challenge and a new generation on the next exchange.
+The occupied-writer regression `busy_admission_does_not_acquire_an_extra_generation`
+fails before writer admission is moved ahead of callback acquisition (exit 101):
+two unadmitted attempts acquire two extra generations. It covers both Basic and
+Digest. The callback path now shares native `request_mode`'s writer-first
+admission check through `gst_runtime_rtsp_request_admission`; busy attempts do
+not acquire, and invalid connections retain their native error. Fixed-source
+validation order is unchanged. This adds the admission query to the private
+native ABI. The Rust library, RTSP and keepalive suites and library/test Clippy
+pass on macOS arm64.

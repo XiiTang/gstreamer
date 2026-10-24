@@ -688,3 +688,42 @@ fn digest_info_without_qop_proves_nothing_and_its_lines_are_one_list() {
     let sent = String::from_utf8(request(&mut server)).unwrap();
     assert!(sent.contains("nonce=\"n3\""), "{sent}");
 }
+
+/// The native writer admits the exchange before its callback supplies a generation.
+#[test]
+fn busy_admission_does_not_acquire_an_extra_generation() {
+    use boundless_media::rtsp::Credential;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use zeroize::Zeroizing;
+    for basic in [true, false] {
+        let (stream, _server) = UnixStream::pair().unwrap();
+        let mut client = Rtsp::from_stream(stream.into(), URI, Version::V2, 4096).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let acquired = reads.clone();
+        client
+            .configure_authentication_callback(
+                Box::new(move || {
+                    acquired.fetch_add(1, Ordering::SeqCst);
+                    Ok(if basic {
+                        Credential::Basic(Zeroizing::new("Basic first".into()))
+                    } else {
+                        Credential::Digest {
+                            username: Zeroizing::new("user".into()),
+                            password: Zeroizing::new("first".into()),
+                        }
+                    })
+                }),
+                basic,
+                true,
+            )
+            .unwrap();
+        assert_eq!(client.request_begin("OPTIONS", URI, &[], &[]).0, Ok(true));
+        for _ in 0..2 {
+            assert_eq!(client.request_begin("OPTIONS", URI, &[], &[]).0, Ok(false));
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "basic={basic}");
+    }
+}

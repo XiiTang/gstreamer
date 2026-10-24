@@ -328,6 +328,11 @@ gst_runtime_rtsp_take_response (GstRuntimeRtsp *client, GstRuntimeRtspMessage *m
 }
 
 int
+gst_runtime_rtsp_request_admission (GstRuntimeRtsp *client)
+{
+  return gst_rtsp_runtime_client_request_admission (client ? client->client : NULL);
+}
+int
 gst_runtime_rtsp_request_ready (GstRuntimeRtsp *client)
 {
   return client && gst_rtsp_runtime_client_request_ready (client->client);

@@ -183,14 +183,26 @@ gst_rtsp_runtime_client_new (const GstRTSPUrl *url, GSocket *socket, GstRTSPVers
   *output = client;
   return GST_RTSP_OK;
 }
+/* Writer admission precedes credential acquisition and request construction. */
+int
+gst_rtsp_runtime_client_request_admission (GstRTSPRuntimeClient *client)
+{
+  if (client && gst_rtsp_connection_write_pending (client->connection))
+    return 1;
+  if (!client || client->pending || client->unknown)
+    return GST_RTSP_EINVAL;
+  return GST_RTSP_OK;
+}
+
 static int
 request_mode (GstRTSPRuntimeClient *client, GstRTSPMessage *request, gint64 timeout,
               gboolean incremental)
 {
-  if (client && gst_rtsp_connection_write_pending (client->connection))
-    return incremental ? 1 : GST_RTSP_EINVAL;
-  g_return_val_if_fail (client && request, GST_RTSP_EINVAL);
-  if (client->pending || client->unknown || !gst_rtsp_message_is_safe_to_serialize (request)
+  int admission = gst_rtsp_runtime_client_request_admission (client);
+  if (admission != GST_RTSP_OK)
+    return admission == 1 && !incremental ? GST_RTSP_EINVAL : admission;
+  g_return_val_if_fail (request, GST_RTSP_EINVAL);
+  if (!gst_rtsp_message_is_safe_to_serialize (request)
       || request->type != GST_RTSP_MESSAGE_REQUEST
       || request->type_data.request.version != client->version
       || !valid_uri (request->type_data.request.uri))
