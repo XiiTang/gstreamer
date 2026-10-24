@@ -7,6 +7,7 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 
 | Patch | Why | Regression |
 | --- | --- | --- |
+| [Remove unused RTSP dispatch query](#unused-rtsp-dispatch-query-driver-plan-fork-audit) | Owner-approved removal of b6d8c35a9c; write admission and progress retain their returned `Dispatch` | Rust API and native export probes fail before removal and pass after; native RTSP transport and the whole Rust crate suite |
 | Rust lint prerequisite (issue #63) | Use the existing null-pointer idiom in RTSP message copying and the common `12 + tag` minimum in SRTP validation; behavior is unchanged | With the matching private `BOUNDLESS_MEDIA_PREFIX`, `cargo clippy --manifest-path runtime/rust/Cargo.toml --all-targets --locked -- -D warnings`: pinned base exits 101 for `cmp_null` and `if_same_then_else`; repaired source exits 0 on macOS arm64 |
 | [DTLS-SRTP](runtime/README.md#dtls-srtp) | Keys are exported only after a verified peer, for the declared profiles, from one handshake per connection, and are cleansed after use | `runtime/tests/dtls_interop.c` built by `runtime/tests/build_dtls.py`, against an independent OpenSSL DTLS server; `runtime/tests/dtls_owner.c` |
 | [Controlled RTSP and RTP payloads](runtime/README.md#controlled-rtsp-and-rtp-payloads) | The RTSP client and payload transforms run on a stream and frames Boundless supplies, with bounded queues and no resolving, redirects, retries or pipeline strings | `runtime/tests/full_native.py` with FFmpeg fixtures; `runtime/tests/rtsp_transport.c`; `runtime/rust/tests/rtsp.rs` and `payload.rs` |
@@ -68,3 +69,34 @@ The test synchronizes with the actual source task and checks five fatal
 results, plus EOS and FLUSHING, through the bus. The whole affected suite,
 `meson test -C "$GOOD_BUILD" --no-rebuild --print-errorlogs
 elements_rtpjitterbuffer`, also passes (exit 0) on macOS arm64.
+
+## Unused RTSP dispatch query (driver plan fork audit)
+
+The owner-approved fork audit retires b6d8c35a9c under driver-plan Rules 8/18:
+only the unused `Rtsp::pending_dispatch` and its C/FFI bridge are removed.
+`request_begin` and `write_step` still return `Dispatch`; their existing C
+checkpoints, `request_mode` and `gst_runtime_rtsp_write_step`, keep the native
+sequence and actual write progress. No API or new checkpoint is added.
+Upstream likewise returns the send result at the send call
+(`subprojects/gst-plugins-good/gst/rtsp/gstrtspsrc.c:3125-3141`).
+
+On macOS arm64, a temporary Rust API probe compiled with `rustc --emit=metadata`
+calls `client.pending_dispatch()`: parent 5526f1ed00 compiles (the absence check
+exits 1); the removal produces E0599 (the check exits 0). A native `nm -gU`
+export probe likewise exits 1 on that parent's private artifact and 0 after
+removal, while requiring both write admission and progress exports to remain.
+These probes are temporary: the retired API shape gets no permanent test.
+
+With the matching private native artifact, `cargo test --manifest-path
+runtime/rust/Cargo.toml --locked -- --test-threads=2 --include-ignored` passes
+all 32 tests (exit 0), including
+`incremental_owned_request_and_declared_data_progress_while_read_is_partial`
+and the independent FFmpeg test. The native `runtime/tests/rtsp_transport.c`
+test passes (exit 0), including partial-write duplex progress and cancellation.
+All-target strict Clippy and Rust fmt also pass (exit 0).
+
+Landing must run Boundless `protocols::rtsp::` and `protocols::media`, including
+RTSP-IO's `rtsp_inbound_and_state_progress_while_outbound_peer_is_not_draining`,
+`bridge_preserves_io_cause_and_later_native_partial_response` and
+`rtsp_close_interrupts_partial_response_and_joins_native_owner`, and RTSP-LATE's
+`a_response_its_operation_stopped_waiting_for_is_an_event`.
