@@ -205,12 +205,12 @@ exchange (ServerIdentity *server_certificate, const char *profile, const char *s
     {
       g_assert_false (failed);
       g_assert_true (server_done);
-      guint length = key_length + salt_length;
-      g_assert_cmpuint (client.enc_length, ==, length);
-      g_assert_cmpuint (client.dec_length, ==, length);
+      guint key_size = key_length + salt_length;
+      g_assert_cmpuint (client.enc_length, ==, key_size);
+      g_assert_cmpuint (client.dec_length, ==, key_size);
       guint8 exported[88];
       const char label[] = "EXTRACTOR-dtls_srtp";
-      g_assert_cmpint (SSL_export_keying_material (server, exported, 2 * length, label,
+      g_assert_cmpint (SSL_export_keying_material (server, exported, 2 * key_size, label,
                                                    sizeof (label) - 1, NULL, 0, 0),
                        ==, 1);
       g_assert_cmpmem (client.encoder, key_length, exported, key_length);
@@ -220,8 +220,8 @@ exchange (ServerIdentity *server_certificate, const char *profile, const char *s
       g_assert_cmpmem (client.decoder + key_length, salt_length,
                        exported + 2 * key_length + salt_length, salt_length);
       if (previous[0])
-        g_assert_cmpint (CRYPTO_memcmp (previous + 1, client.encoder, length), !=, 0);
-      memcpy (previous + 1, client.encoder, length);
+        g_assert_cmpint (CRYPTO_memcmp (previous + 1, client.encoder, key_size), !=, 0);
+      memcpy (previous + 1, client.encoder, key_size);
       previous[0] = 1;
       OPENSSL_cleanse (exported, sizeof (exported));
       g_assert_cmpint (gst_runtime_dtls_start (connection, 1), <, 0);

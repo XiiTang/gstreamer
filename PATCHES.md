@@ -206,3 +206,12 @@ zero-capacity text and peer close-notify (CLOSED before generic PROCESS).
 of a queued error and a failed construction. Rust RTP tests exercise the sink
 lifetime through construction, cancellation and consuming close. These are
 native-owner checks; they do not claim Boundless transport acceptance.
+
+The W5-D5 native-owner regressions above pass on macOS arm64, including the
+independent OpenSSL DTLS exporter/close-notify checks, deterministic callback
+and bus-handler fences, and H264/H265 capacity failures. All seven payload
+round trips preserve independent FFmpeg pixels for H264/H265/JPEG. The Rust
+RTP/DTLS and payload/SDP owner tests and strict library/test Clippy pass; the
+construction/stop fixture also passes with `--cfg rtp_stop_test`. The direct
+construction fixture initializes the library explicitly, independently of test
+ordering. These checks retain no optional Boundless diagnostic text.

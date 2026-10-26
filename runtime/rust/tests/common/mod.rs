@@ -10,7 +10,12 @@ impl boundless_media::rtp::DiagnosticSink for Recording {
 }
 impl Recording {
     pub fn assert_none(&self) {
-        assert!(self.0.lock().unwrap().is_empty());
+        assert_eq!(
+            self.count(),
+            0,
+            "unexpected native bus error: {:?}",
+            self.first()
+        );
     }
     pub fn first(&self) -> Option<(String, i32)> {
         self.0.lock().unwrap().first().cloned()

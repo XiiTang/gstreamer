@@ -519,7 +519,12 @@ mod tests {
     }
     impl Recording {
         pub fn assert_none(&self) {
-            assert!(self.0.lock().unwrap().is_empty());
+            assert_eq!(
+                self.count(),
+                0,
+                "unexpected native bus error: {:?}",
+                self.first()
+            );
         }
         pub fn first(&self) -> Option<(String, i32)> {
             self.0.lock().unwrap().first().cloned()
@@ -749,6 +754,7 @@ mod tests {
     #[cfg(rtp_stop_test)]
     #[test]
     fn a_failed_construction_offers_its_bus_error_before_it_returns() {
+        crate::initialize();
         unsafe extern "C" {
             fn test_rtp_failing_new(sink: *const RawSink) -> *mut c_void;
         }
