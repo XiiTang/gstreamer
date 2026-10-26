@@ -53,6 +53,14 @@ unsafe extern "C" {
     fn gst_runtime_dtls_output(raw: *mut c_void, bytes: *mut u8, length: *mut usize) -> i32;
     fn gst_runtime_dtls_take_keys(raw: *mut c_void, keys: *mut NativeKeys) -> i32;
     fn gst_runtime_dtls_fingerprint(raw: *mut c_void, output: *mut u8) -> i32;
+    fn gst_runtime_dtls_failure(
+        raw: *mut c_void,
+        domain: *mut *const c_char,
+        code: *mut i32,
+        text: *mut u8,
+        capacity: usize,
+        length: *mut usize,
+    ) -> i32;
     fn gst_runtime_dtls_free(raw: *mut c_void);
 }
 unsafe extern "C" fn verify_chain(
@@ -153,6 +161,32 @@ impl Association {
             raw: NonNull::new(raw).ok_or(Error::INVALID)?,
             _verifier: verifier,
             _exclusive: PhantomData,
+        })
+    }
+    /// Reads the first native fact and at most text.len() message bytes.
+    pub fn failure(&mut self, text: &mut [u8]) -> Option<(crate::Fact, usize)> {
+        let mut domain = std::ptr::null();
+        let mut code = 0;
+        let mut length = 0;
+        let result = unsafe {
+            gst_runtime_dtls_failure(
+                self.raw.as_ptr(),
+                &mut domain,
+                &mut code,
+                text.as_mut_ptr(),
+                text.len(),
+                &mut length,
+            )
+        };
+        (result == 1).then(|| {
+            (
+                crate::Fact {
+                    // GLib quark strings are never freed.
+                    domain: unsafe { std::ffi::CStr::from_ptr(domain) },
+                    code,
+                },
+                length,
+            )
         })
     }
     pub fn start(&mut self, client: bool) -> Result<(), Error> {

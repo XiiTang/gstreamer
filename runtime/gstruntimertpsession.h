@@ -24,8 +24,14 @@ typedef struct
 } GstRuntimeRtpSettings;
 /* One transport RTP session. The same owner is used by direct RTP and a
  * negotiated RTSP track. No sockets, keys, encoders, or arbitrary pipelines. */
-GST_API
-GstRuntimeRtpSession *gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings);
+/* Borrowed message, valid only during offer under stop_mutex. Must not re-enter
+ * the session. data stays live through free, including failed construction. */
+typedef struct {
+  void (*offer) (gpointer data, const gchar *domain, gint code, const gchar *message, gsize length);
+  gpointer data;
+} GstRuntimeDiagnosticSink;
+GST_API GstRuntimeRtpSession *gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings,
+                                                          const GstRuntimeDiagnosticSink *sink);
 /* Input ports: 0 outbound RTP, 1 inbound RTP, 2 inbound RTCP. */
 GST_API
 int gst_runtime_rtp_session_write (GstRuntimeRtpSession *session, int port, const guint8 *data,

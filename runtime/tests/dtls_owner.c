@@ -79,7 +79,7 @@ finalized (gpointer data, GObject *object)
 static void
 exchange (ServerIdentity *server_certificate, const char *profile, const char *server_profile,
           guint key_length, guint salt_length, gboolean trust, gboolean install_verifier,
-          gboolean identity, guint8 *previous)
+          gboolean identity, guint8 *previous, gboolean close_notify)
 {
   struct sockaddr_in client_address, server_address;
   Client client = { .root = server_certificate->root, .trust = trust };
@@ -226,11 +226,41 @@ exchange (ServerIdentity *server_certificate, const char *profile, const char *s
       OPENSSL_cleanse (exported, sizeof (exported));
       g_assert_cmpint (gst_runtime_dtls_start (connection, 1), <, 0);
       g_assert_cmpint (gst_runtime_dtls_take_keys (connection, &keys), <, 0);
+      const gchar *domain; gint code; gsize length;
+      g_assert_cmpint (gst_runtime_dtls_failure (connection, &domain, &code, NULL, 0, &length), ==, 0);
+      if (close_notify) {
+        g_assert_cmpint (SSL_shutdown (server), ==, 0);
+        int result = 0;
+        for (guint i = 0; i < 8 && result == 0; i++) {
+          struct pollfd fd = { client.socket, POLLIN, 0 };
+          g_assert_cmpint (poll (&fd, 1, 5000), ==, 1);
+          guint8 datagram[65536]; ssize_t size = recv (client.socket, datagram, sizeof (datagram), 0);
+          g_assert_cmpint (size, >, 0);
+          result = gst_runtime_dtls_input (connection, datagram, size);
+        }
+        g_assert_cmpint (result, ==, -11);
+        for (guint i = 0; i < 2; i++) {
+          g_assert_cmpint (gst_runtime_dtls_failure (connection, &domain, &code, NULL, 0, &length), ==, 1);
+          g_assert_cmpstr (domain, ==, "gst-runtime-dtls-error-quark");
+          g_assert_cmpint (code, ==, GST_RUNTIME_DTLS_ERROR_CLOSED); g_assert_cmpuint (length, ==, 0);
+        }
+      }
     }
   else
     {
       g_assert_cmpuint (client.enc_length, ==, 0);
       g_assert_cmpuint (client.dec_length, ==, 0);
+      if (install_verifier && identity) {
+        const gchar *domain; gint code; gsize length; gchar text[64] = {0};
+        g_assert_cmpint (gst_runtime_dtls_failure (connection, &domain, &code, text, sizeof (text), &length), ==, 1);
+        g_assert_cmpstr (domain, ==, "gst-resource-error-quark");
+        if (trust && strcmp (profile, server_profile)) {
+          g_assert_cmpint (code, ==, GST_RESOURCE_ERROR_READ);
+          g_assert_cmpmem (text, length, "No supported SRTP profile negotiated", strlen ("No supported SRTP profile negotiated"));
+        }
+        g_assert_cmpint (gst_runtime_dtls_failure (connection, &domain, &code, NULL, 0, &length), ==, 1);
+        g_assert_cmpuint (length, ==, 0);
+      }
     }
   guint sent = client.count;
   gint64 before = g_get_monotonic_time ();
@@ -302,15 +332,17 @@ main (int argc, char **argv)
       guint8 previous[45] = { 0 };
       for (guint repeat = 0; repeat < 2; repeat++)
         exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, TRUE,
-                  TRUE, previous);
+                  TRUE, previous, FALSE);
       exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], FALSE, TRUE,
-                TRUE, previous);
+                TRUE, previous, FALSE);
       exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, FALSE,
-                TRUE, previous);
+                TRUE, previous, FALSE);
       exchange (server, profiles[i], profiles[(i + 1) % 3], key_lengths[i], salt_lengths[i], TRUE,
-                TRUE, TRUE, previous);
+                TRUE, TRUE, previous, FALSE);
       exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, TRUE,
-                FALSE, previous);
+                FALSE, previous, FALSE);
+      exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, TRUE,
+                TRUE, previous, TRUE);
       OPENSSL_cleanse (previous, sizeof (previous));
       g_print ("PASS opaque DTLS %s: independent exporter, verified mTLS chain, missing client "
                "identity rejection, fresh keys, rejected identity, missing "

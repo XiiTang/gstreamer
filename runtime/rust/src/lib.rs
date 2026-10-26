@@ -31,3 +31,10 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+
+/// A native error domain is an immortal GLib quark string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fact {
+    pub domain: &'static std::ffi::CStr,
+    pub code: i32,
+}

@@ -16,7 +16,53 @@ struct GstRuntimeDtls
   GQueue output;
   GstRuntimeDtlsKeys keys;
   gboolean encoder, decoder, taken, started, failed;
+  GQuark failure_domain;
+  gint failure_code;
+  gchar *failure_message;
 };
+
+G_DEFINE_QUARK (gst-runtime-dtls-error-quark, gst_runtime_dtls_error)
+
+/* The one first-failure setter; self->mutex is held. */
+static void
+fail_locked (GstRuntimeDtls *self, GQuark domain, gint code, const gchar *message)
+{
+  self->failed = TRUE;
+  if (!self->failure_domain)
+    {
+      self->failure_domain = domain;
+      self->failure_code = code;
+      self->failure_message = g_strdup (message);
+    }
+}
+static const gchar *
+fallback_message (GstRuntimeDtlsError code)
+{
+  switch (code)
+    {
+    case GST_RUNTIME_DTLS_ERROR_OUTPUT_FULL: return "DTLS output queue full";
+    case GST_RUNTIME_DTLS_ERROR_OUTPUT_INVALID: return "Invalid DTLS output datagram";
+    case GST_RUNTIME_DTLS_ERROR_KEY_INVALID: return "Invalid DTLS SRTP key";
+    case GST_RUNTIME_DTLS_ERROR_APPLICATION_DATA: return "Unexpected DTLS application data";
+    case GST_RUNTIME_DTLS_ERROR_CLOSED: return "DTLS connection closed";
+    case GST_RUNTIME_DTLS_ERROR_START: return "DTLS start failed";
+    case GST_RUNTIME_DTLS_ERROR_PROCESS: return "DTLS process failed";
+    }
+  g_assert_not_reached ();
+}
+static void
+fail (GstRuntimeDtls *self, const GError *error, GstRuntimeDtlsError fallback)
+{
+  g_mutex_lock (&self->mutex);
+  fail_locked (self, error ? error->domain : gst_runtime_dtls_error_quark (),
+               error ? error->code : fallback, error ? error->message : fallback_message (fallback));
+  g_mutex_unlock (&self->mutex);
+}
+static void
+failure_callback (GstDtlsConnection *connection, const GError *error, gpointer data)
+{
+  fail (data, error, GST_RUNTIME_DTLS_ERROR_PROCESS);
+}
 
 static gboolean
 send_packet (GstDtlsConnection *connection, gconstpointer data, gsize length, gpointer value)
@@ -27,7 +73,11 @@ send_packet (GstDtlsConnection *connection, gconstpointer data, gsize length, gp
   if (accepted)
     g_queue_push_tail (&self->output, g_bytes_new (data, length));
   else
-    self->failed = TRUE;
+    {
+      GstRuntimeDtlsError code = self->output.length >= 32
+          ? GST_RUNTIME_DTLS_ERROR_OUTPUT_FULL : GST_RUNTIME_DTLS_ERROR_OUTPUT_INVALID;
+      fail_locked (self, gst_runtime_dtls_error_quark (), code, fallback_message (code));
+    }
   g_mutex_unlock (&self->mutex);
   return accepted;
 }
@@ -47,7 +97,8 @@ save_key (GstRuntimeDtls *self, gboolean sending, gconstpointer key, guint lengt
   g_mutex_lock (&self->mutex);
   if (!profile || (sending ? self->encoder : self->decoder) || self->taken
       || (self->keys.profile && self->keys.profile != profile))
-    self->failed = TRUE;
+    fail_locked (self, gst_runtime_dtls_error_quark (), GST_RUNTIME_DTLS_ERROR_KEY_INVALID,
+                 fallback_message (GST_RUNTIME_DTLS_ERROR_KEY_INVALID));
   else
     {
       self->keys.profile = profile;
@@ -137,7 +188,8 @@ gst_runtime_dtls_create (const gchar *pem, const gchar *profiles, GstDtlsVerifyC
     }
   self->connection = g_object_new (GST_TYPE_DTLS_CONNECTION, "agent", self->agent, NULL);
   if (!gst_dtls_connection_set_srtp_profiles (self->connection, profiles)
-      || !gst_dtls_connection_set_chain_verifier (self->connection, verify, data))
+      || !gst_dtls_connection_set_chain_verifier (self->connection, verify, data)
+      || !gst_dtls_connection_set_failure_callback (self->connection, failure_callback, self))
     goto invalid;
   g_signal_connect (self->connection, "on-encoder-key", G_CALLBACK (encoder_key), self);
   g_signal_connect (self->connection, "on-decoder-key", G_CALLBACK (decoder_key), self);
@@ -157,6 +209,8 @@ gst_runtime_dtls_start (GstRuntimeDtls *self, int client)
   self->started = TRUE;
   GError *error = NULL;
   gboolean success = gst_dtls_connection_start (self->connection, client, &error);
+  if (!success)
+    fail (self, error, GST_RUNTIME_DTLS_ERROR_START);
   g_clear_error (&error);
   if (!success)
     return -1001;
@@ -188,21 +242,27 @@ gst_runtime_dtls_input (GstRuntimeDtls *self, guint8 *bytes, gsize length)
 {
   if (!self || !self->started || !bytes || !length || length > 65535)
     return -2;
-  if (gst_runtime_dtls_status (self) < 0)
-    return -1001;
+  int status = gst_runtime_dtls_status (self);
+  if (status < 0)
+    {
+      if (status == -11)
+        fail (self, NULL, GST_RUNTIME_DTLS_ERROR_CLOSED);
+      return -1001;
+    }
   GError *error = NULL;
   gsize written = 0;
   GstFlowReturn result
       = gst_dtls_connection_process (self->connection, bytes, length, &written, &error);
+  /* EOS precedes generic negative results: it is the peer's close-notify. */
+  if (result == GST_FLOW_EOS)
+    fail (self, NULL, GST_RUNTIME_DTLS_ERROR_CLOSED);
+  else if (result < 0)
+    fail (self, error, GST_RUNTIME_DTLS_ERROR_PROCESS);
+  else if (written > 0)
+    fail (self, NULL, GST_RUNTIME_DTLS_ERROR_APPLICATION_DATA);
   g_clear_error (&error);
-  /* This owner admits DTLS-SRTP only, never DTLS application data. */
   if (result < 0 || written)
-    {
-      g_mutex_lock (&self->mutex);
-      self->failed = TRUE;
-      g_mutex_unlock (&self->mutex);
-      return result == GST_FLOW_EOS ? -11 : -1001;
-    }
+    return result == GST_FLOW_EOS ? -11 : -1001;
   gst_dtls_connection_check_timeout (self->connection);
   return gst_runtime_dtls_status (self) < 0 ? -1001 : 0;
 }
@@ -262,6 +322,26 @@ gst_runtime_dtls_fingerprint (GstRuntimeDtls *self, guint8 output[32])
   X509 *cert = _gst_dtls_certificate_get_internal_certificate (self->certificate);
   return X509_digest (cert, EVP_sha256 (), output, &length) && length == 32 ? 0 : -2;
 }
+int
+gst_runtime_dtls_failure (GstRuntimeDtls *self, const gchar **domain, gint *code,
+                          gchar *text, gsize capacity, gsize *length)
+{
+  if (!self || !domain || !code || !length || (capacity && !text))
+    return -2;
+  g_mutex_lock (&self->mutex);
+  int result = self->failure_domain ? 1 : 0;
+  *length = 0;
+  if (result)
+    {
+      *domain = g_quark_to_string (self->failure_domain);
+      *code = self->failure_code;
+      *length = MIN (capacity, strlen (self->failure_message));
+      if (*length)
+        memcpy (text, self->failure_message, *length);
+    }
+  g_mutex_unlock (&self->mutex);
+  return result;
+}
 void
 gst_runtime_dtls_free (GstRuntimeDtls *self)
 {
@@ -272,6 +352,7 @@ gst_runtime_dtls_free (GstRuntimeDtls *self)
       gst_dtls_connection_stop_and_join (self->connection);
       g_object_unref (self->connection);
     }
+  g_free (self->failure_message);
   g_clear_object (&self->agent);
   g_clear_object (&self->certificate);
   g_queue_clear_full (&self->output, (GDestroyNotify)g_bytes_unref);

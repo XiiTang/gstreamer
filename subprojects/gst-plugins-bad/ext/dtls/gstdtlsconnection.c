@@ -103,6 +103,8 @@ struct _GstDtlsConnectionPrivate
   gint bio_buffer_len;
   gint bio_buffer_offset;
 
+  GstDtlsConnectionFailureCallback failure_callback;
+  gpointer failure_callback_data;
   GstDtlsConnectionSendCallback send_callback;
   gpointer send_callback_user_data;
   GDestroyNotify send_callback_destroy_notify;
@@ -126,6 +128,18 @@ static void gst_dtls_connection_get_property (GObject *, guint prop_id,
 
 static void log_state (GstDtlsConnection *, const gchar * str);
 static gboolean export_srtp_keys (GstDtlsConnection *, GError ** err);
+/* Called only with priv->mutex held, before the failure becomes observable. */
+static void
+report_failure (GstDtlsConnection *self, GError *error, GError **err)
+{
+  if (self->priv->failure_callback)
+    self->priv->failure_callback (self, error, self->priv->failure_callback_data);
+  if (err)
+    *err = error;
+  else
+    g_error_free (error);
+}
+
 static GstFlowReturn openssl_poll (GstDtlsConnection *, gboolean * notify_state,
     GError ** err);
 static GstFlowReturn handle_error (GstDtlsConnection * self, int ret,
@@ -421,6 +435,8 @@ handle_timeout (gpointer data, gpointer user_data)
 
     if (ret < 0) {
       GST_WARNING_OBJECT (self, "handling timeout failed");
+      report_failure (self, g_error_new_literal (GST_RESOURCE_ERROR,
+              GST_RESOURCE_ERROR_FAILED, "DTLS retransmission timer failed"), NULL);
       if (priv->connection_state != GST_DTLS_CONNECTION_STATE_FAILED) {
         priv->connection_state = GST_DTLS_CONNECTION_STATE_FAILED;
         notify_state = TRUE;
@@ -1028,8 +1044,9 @@ done:
   OPENSSL_cleanse (exported, sizeof (exported));
   OPENSSL_cleanse (client, sizeof (client));
   OPENSSL_cleanse (server, sizeof (server));
-  if (!success && err)
-    *err = g_error_new_literal (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_READ, failure);
+  if (!success)
+    report_failure (self, g_error_new_literal (GST_RESOURCE_ERROR,
+            GST_RESOURCE_ERROR_READ, failure), err);
   return success;
 }
 
@@ -1063,15 +1080,13 @@ handle_error (GstDtlsConnection * self, int ret, GstResourceError error_type,
       return GST_FLOW_OK;
     case SSL_ERROR_SSL:
       GST_ERROR_OBJECT (self, "Fatal SSL error");
+      report_failure (self, g_error_new_literal (GST_RESOURCE_ERROR, error_type,
+              "Fatal SSL error"), err);
       if (self->priv->connection_state != GST_DTLS_CONNECTION_STATE_FAILED) {
         self->priv->connection_state = GST_DTLS_CONNECTION_STATE_FAILED;
         *notify_state = TRUE;
       }
       ERR_print_errors_cb (ssl_err_cb, self);
-      if (err)
-        *err =
-            g_error_new_literal (GST_RESOURCE_ERROR, error_type,
-            "Fatal SSL error");
       return GST_FLOW_ERROR;
     case SSL_ERROR_ZERO_RETURN:
       GST_LOG_OBJECT (self, "Connection was closed");
@@ -1096,15 +1111,13 @@ handle_error (GstDtlsConnection * self, int ret, GstResourceError error_type,
       return rc;
     }
     default:
+      report_failure (self, g_error_new (GST_RESOURCE_ERROR, error_type,
+              "Unknown SSL error: %d, ret: %d", error, ret), err);
       if (self->priv->connection_state != GST_DTLS_CONNECTION_STATE_FAILED) {
         self->priv->connection_state = GST_DTLS_CONNECTION_STATE_FAILED;
         *notify_state = TRUE;
       }
       GST_ERROR_OBJECT (self, "Unknown SSL error: %d, ret: %d", error, ret);
-      if (err)
-        *err =
-            g_error_new (GST_RESOURCE_ERROR, error_type,
-            "Unknown SSL error: %d, ret: %d", error, ret);
       return GST_FLOW_ERROR;
   }
 }
@@ -1160,6 +1173,22 @@ openssl_poll (GstDtlsConnection * self, gboolean * notify_state, GError ** err)
   ERR_print_errors_cb (ssl_warn_cb, self);
 
   return flow_ret;
+}
+
+gboolean
+gst_dtls_connection_set_failure_callback (GstDtlsConnection *self,
+    GstDtlsConnectionFailureCallback callback, gpointer data)
+{
+  gboolean valid;
+  g_return_val_if_fail (GST_IS_DTLS_CONNECTION (self), FALSE);
+  g_mutex_lock (&self->priv->mutex);
+  valid = callback != NULL && self->priv->failure_callback == NULL && !self->priv->started;
+  if (valid) {
+    self->priv->failure_callback = callback;
+    self->priv->failure_callback_data = data;
+  }
+  g_mutex_unlock (&self->priv->mutex);
+  return valid;
 }
 
 gboolean

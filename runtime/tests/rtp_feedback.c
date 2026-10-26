@@ -1,3 +1,4 @@
+#include "test_sink.h"
 /* Exercise native loss detection, NACK/RTX repair and explicit PLI/FIR. */
 #include "gstruntimertpsession.h"
 #include <gst/rtp/gstrtcpbuffer.h>
@@ -69,8 +70,10 @@ main (int argc, char **argv)
   GstRuntimeRtpSettings bc = ac;
   bc.ssrc = 8;
   bc.rtx = &bt;
-  GstRuntimeRtpSession *a = gst_runtime_rtp_session_new (&ac),
-                       *b = gst_runtime_rtp_session_new (&bc);
+  TestSink as = {0}, bs = {0};
+  GstRuntimeDiagnosticSink a_sink = test_sink (&as), b_sink = test_sink (&bs);
+  GstRuntimeRtpSession *a = gst_runtime_rtp_session_new (&ac, &a_sink),
+                       *b = gst_runtime_rtp_session_new (&bc, &b_sink);
   g_assert_nonnull (a);
   g_assert_nonnull (b);
   for (guint seq = 1; seq <= 3; seq++)
@@ -153,16 +156,20 @@ main (int argc, char **argv)
   g_thread_join (pressure);
   g_assert_cmpint (g_get_monotonic_time () - stopped, <, G_USEC_PER_SEC);
   gst_runtime_rtp_session_free (a);
+  test_sink_assert_none (&as);
   gst_runtime_rtp_session_free (b);
+  test_sink_assert_none (&bs);
   ac.rtx = NULL;
   ac.feedback = 0;
-  a = gst_runtime_rtp_session_new (&ac);
+  a = gst_runtime_rtp_session_new (&ac, &a_sink);
   g_assert_nonnull (a);
   for (guint kind = 1; kind <= 4; kind <<= 1)
     g_assert_cmpint (gst_runtime_rtp_session_feedback (a, kind, 7, 0, 0), <, 0);
   gst_runtime_rtp_session_free (a);
+  test_sink_assert_none (&as);
   ac.rtx = &at;
-  g_assert_null (gst_runtime_rtp_session_new (&ac));
+  g_assert_null (gst_runtime_rtp_session_new (&ac, &a_sink));
+  test_sink_assert_none (&as);
   g_print ("PASS declared native NACK/RTX loss repair, exact RTX mapping and payload, ordered "
            "recovery, explicit PLI/FIR and undeclared rejection\n");
 }

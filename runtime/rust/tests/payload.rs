@@ -1,7 +1,9 @@
+mod common;
 use boundless_media::{
     payload::{Configuration, Format, Frame},
     rtp::{self, Input, Output, Session},
 };
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn config(format: Format) -> Configuration<'static> {
@@ -25,20 +27,25 @@ fn config(format: Format) -> Configuration<'static> {
     }
 }
 
-fn session(payload: Option<&Configuration<'_>>, ssrc: u32) -> Session {
-    Session::new(rtp::Configuration {
-        ssrc,
-        payload_type: 96,
-        clock_rate: 8000,
-        probation: 0,
-        reports: None,
-        feedback: None,
-        bandwidth_bps: None,
-        payload,
-        reorder_latency: None,
-        negotiated: None,
-    })
-    .unwrap()
+fn session(payload: Option<&Configuration<'_>>, ssrc: u32) -> (Session, Arc<common::Recording>) {
+    let rec = Arc::new(common::Recording::default());
+    let owner = Session::new(
+        rtp::Configuration {
+            ssrc,
+            payload_type: 96,
+            clock_rate: 8000,
+            probation: 0,
+            reports: None,
+            feedback: None,
+            bandwidth_bps: None,
+            payload,
+            reorder_latency: None,
+            negotiated: None,
+        },
+        rec.clone(),
+    )
+    .unwrap();
+    (owner, rec)
 }
 
 fn read(session: &mut Session, port: Output) -> Frame {
@@ -56,12 +63,12 @@ fn read(session: &mut Session, port: Output) -> Frame {
 fn production_sessions_preserve_encoded_frames_and_raw_packets() {
     for format in [Format::Pcma, Format::Pcmu] {
         let codec = config(format);
-        let mut send = session(Some(&codec), 123);
+        let (mut send, send_facts) = session(Some(&codec), 123);
         let receive_codec = Configuration {
             ssrc: 456,
             ..config(format)
         };
-        let mut receive = session(Some(&receive_codec), 456);
+        let (mut receive, receive_facts) = session(Some(&receive_codec), 456);
         let samples: Vec<u8> = (0..160).collect();
         for index in 0..2u64 {
             assert!(
@@ -77,18 +84,24 @@ fn production_sessions_preserve_encoded_frames_and_raw_packets() {
             assert!(receive.try_write(Input::ReceiveRtp, &packet.data).unwrap());
             assert_eq!(read(&mut receive, Output::ReceiveRtp).data, samples);
         }
+        drop(send);
+        drop(receive);
+        send_facts.assert_none();
+        receive_facts.assert_none();
     }
-    let mut raw = session(None, 123);
+    let (mut raw, raw_facts) = session(None, 123);
     let bytes = [0x80, 96, 0, 0, 0, 1, 2, 3, 0, 0, 0, 123, 255, 0, 1];
     assert!(raw.try_write(Input::SendRtp, &bytes).unwrap());
     assert_eq!(read(&mut raw, Output::SendRtp).data, bytes);
     assert!(raw.try_write(Input::SendRtp, &[0; 12]).is_err());
+    drop(raw);
+    raw_facts.assert_none();
 }
 
 #[test]
 fn production_session_cancellation_releases_pressured_frame_input() {
     let codec = config(Format::Pcma);
-    let mut owner = session(Some(&codec), 123);
+    let (mut owner, owner_facts) = session(Some(&codec), 123);
     let end = Instant::now() + Duration::from_secs(5);
     let mut admitted = 0;
     while owner
@@ -107,5 +120,7 @@ fn production_session_cancellation_releases_pressured_frame_input() {
             .is_err()
     );
     let outcome = owner.close();
-    assert!(outcome.bus_errors.is_empty(), "{outcome:?}");
+    assert!(outcome.bus_errors == 0, "{outcome:?}");
+    drop(cancellation);
+    owner_facts.assert_none();
 }

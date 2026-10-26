@@ -9,6 +9,17 @@ are separate acceptance gates; the tests here are native-library evidence.
 - `gst_dtls_connection_set_srtp_profiles` selects only the declared profiles,
   before the first handshake. Each connection permits one handshake. A new
   connection is required for a new security session.
+- `gst_dtls_connection_set_failure_callback` accepts one non-NULL callback only
+  before start/stop, under the connection lock. It refuses replacement without
+  touching the original callback or the caller's data. Each originating failure
+  calls it under that lock before the failure is observable; it must not re-enter
+  the connection. Its data is borrowed through `stop_and_join`.
+- `gst_runtime_dtls_failure` reads the runtime's first domain/code and copies up
+  to capacity message bytes (not NUL-terminated). The domain is an immortal GLib
+  quark string; capacity zero still returns the fact. Runtime codes distinguish
+  output pressure, invalid output/keys, application data, close, start and process.
+  The first failure survives later consequences; free joins callbacks before
+  releasing the slot and its callback data.
 - Supported profiles: AES128_CM_SHA1_80 (30 bytes), AEAD_AES_128_GCM (28 bytes),
   AEAD_AES_256_GCM (44 bytes). Exporter layout is client key, server key, client
   salt, server salt. Native encoder/decoder key signals include the actual length.
@@ -201,14 +212,20 @@ with `Some(Playing)` and `Some(Ready)`.
 ## RTP stop outcome (issue #63)
 
 `rtp::Session::close(self) -> StopOutcome` consumes the exclusive owner and
-reads the first stop's exact `StateChangeReturn` plus one generic `Error(-5)`
-per bus error. `Cancellation::cancel(&self)` remains void and cloneable;
+reads the first stop's exact `StateChangeReturn` plus its bus-error count. `Cancellation::cancel(&self)` remains void and cloneable;
 whichever handle initiates stop publishes the result for that owner. Drop
 still cancels. Close waits for an in-progress stop before taking its result.
 The native pipeline disables NULL's bus auto-flush; a temporary synchronous
 bus handler captures errors posted during the state transition, and queued
 errors are drained before publishing. A concurrent read cannot consume bus
-errors after stop has claimed them. Full GStreamer error content is separate.
+errors after stop has claimed them. Each consumed bus error is offered once before release, under the stop lock,
+through the required borrowed `GstRuntimeDiagnosticSink`. The constructor copies
+its sink before any failing allocation path, so construction cleanup offers its
+errors before returning NULL. The Rust Session keeps the sink alive through
+native free, including cancellation clones; a NULL construction return fences
+all offers before dropping it. A sink must not re-enter the session or wait on
+anything that waits for it. Active reads return `Error::BUS` (-100); counts never
+reconstruct errors.
 
 `tests/build_rtp_stop.py --build "$MEDIA_BUILD" --output "$TEST_OUTPUT"`
 builds the native checkpoint regression and a test-only fixture library.

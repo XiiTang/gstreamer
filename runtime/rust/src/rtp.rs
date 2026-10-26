@@ -68,6 +68,9 @@ pub enum Output {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error(pub i32);
+impl Error {
+    pub const BUS: Self = Self(-100);
+}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Native RTP flow result {}", self.0)
@@ -87,8 +90,8 @@ pub enum StateChangeReturn {
 #[derive(Debug, PartialEq, Eq)]
 pub struct StopOutcome {
     pub state_change: StateChangeReturn,
-    /// One generic native flow error per bus error; message content stays native.
-    pub bus_errors: Vec<Error>,
+    /// Count only; each fact was offered to the sink before release.
+    pub bus_errors: usize,
 }
 #[repr(C)]
 #[derive(Default)]
@@ -225,7 +228,7 @@ unsafe extern "C" fn visit_statistic(raw: *const RawStatistic, user_data: *mut c
     0
 }
 unsafe extern "C" {
-    fn gst_runtime_rtp_session_new(settings: *const Settings) -> *mut c_void;
+    fn gst_runtime_rtp_session_new(settings: *const Settings, sink: *const RawSink) -> *mut c_void;
     fn gst_runtime_rtp_session_try_write(
         session: *mut c_void,
         port: i32,
@@ -262,14 +265,52 @@ unsafe extern "C" {
     fn gst_runtime_rtp_session_close(session: *mut c_void, outcome: *mut RawStopOutcome) -> i32;
     fn gst_runtime_rtp_session_free(session: *mut c_void);
 }
-struct Inner(NonNull<c_void>);
+/// Called under the native stop lock before each bus error is released.
+/// Must not block on anything that waits for the session.
+pub trait DiagnosticSink: Send + Sync + 'static {
+    fn offer(&self, fact: crate::Fact, message: &[u8]);
+}
+#[repr(C)]
+struct RawSink {
+    offer: unsafe extern "C" fn(*mut c_void, *const c_char, i32, *const c_char, usize),
+    data: *mut c_void,
+}
+unsafe extern "C" fn offer(
+    data: *mut c_void,
+    domain: *const c_char,
+    code: i32,
+    message: *const c_char,
+    length: usize,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let sink = unsafe { &*data.cast::<Arc<dyn DiagnosticSink>>() };
+        sink.offer(
+            crate::Fact {
+                // GLib's quark strings have process lifetime.
+                domain: unsafe { CStr::from_ptr(domain) },
+                code,
+            },
+            unsafe { std::slice::from_raw_parts(message.cast(), length) },
+        );
+    }));
+}
+fn raw_sink(sink: &Arc<dyn DiagnosticSink>) -> RawSink {
+    RawSink {
+        offer,
+        data: std::ptr::from_ref(sink).cast_mut().cast(),
+    }
+}
+struct Inner {
+    raw: NonNull<c_void>,
+    _sink: Box<Arc<dyn DiagnosticSink>>,
+}
 // Only cancellation is shared; all data and state entry points require the
 // unique Session. Native stop is designed to run concurrently with them.
 unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
 impl Drop for Inner {
     fn drop(&mut self) {
-        unsafe { gst_runtime_rtp_session_free(self.0.as_ptr()) }
+        unsafe { gst_runtime_rtp_session_free(self.raw.as_ptr()) }
     }
 }
 pub struct Session {
@@ -280,7 +321,7 @@ pub struct Session {
 pub struct Cancellation(Arc<Inner>);
 impl Cancellation {
     pub fn cancel(&self) {
-        unsafe { gst_runtime_rtp_session_stop(self.0.0.as_ptr()) }
+        unsafe { gst_runtime_rtp_session_stop(self.0.raw.as_ptr()) }
     }
 }
 impl Drop for Session {
@@ -331,14 +372,16 @@ pub(crate) fn with_settings<T>(
     Ok(result)
 }
 impl Session {
-    pub fn new(c: Configuration<'_>) -> Result<Self, Error> {
+    pub fn new(c: Configuration<'_>, sink: Arc<dyn DiagnosticSink>) -> Result<Self, Error> {
         crate::initialize();
+        let sink = Box::new(sink);
+        let raw_sink = raw_sink(&sink);
         let raw = with_settings(&c, |settings| unsafe {
-            gst_runtime_rtp_session_new(settings)
+            gst_runtime_rtp_session_new(settings, &raw_sink)
         })?;
         let raw = NonNull::new(raw).ok_or(Error(-5))?;
         Ok(Self {
-            inner: Arc::new(Inner(raw)),
+            inner: Arc::new(Inner { raw, _sink: sink }),
             _exclusive: PhantomData,
         })
     }
@@ -349,7 +392,7 @@ impl Session {
     /// outlive this owner, but cannot consume its outcome or restart the session.
     pub fn close(self) -> StopOutcome {
         let mut raw = RawStopOutcome::default();
-        let result = unsafe { gst_runtime_rtp_session_close(self.inner.0.as_ptr(), &mut raw) };
+        let result = unsafe { gst_runtime_rtp_session_close(self.inner.raw.as_ptr(), &mut raw) };
         assert_eq!(result, 0, "exclusive RTP stop outcome already consumed");
         StopOutcome {
             state_change: match raw.state_change {
@@ -359,14 +402,14 @@ impl Session {
                 3 => StateChangeReturn::NoPreroll,
                 _ => unreachable!("invalid native state-change return"),
             },
-            bus_errors: vec![Error(-5); raw.bus_errors],
+            bus_errors: raw.bus_errors,
         }
     }
     /// False means bounded native input pressure; no bytes were admitted.
     pub fn try_write(&mut self, port: Input, packet: &[u8]) -> Result<bool, Error> {
         match unsafe {
             gst_runtime_rtp_session_try_write(
-                self.inner.0.as_ptr(),
+                self.inner.raw.as_ptr(),
                 port as _,
                 packet.as_ptr(),
                 packet.len(),
@@ -385,7 +428,7 @@ impl Session {
     ) -> Result<bool, Error> {
         match unsafe {
             gst_runtime_rtp_session_try_write_frame(
-                self.inner.0.as_ptr(),
+                self.inner.raw.as_ptr(),
                 bytes.as_ptr(),
                 bytes.len(),
                 pts,
@@ -399,8 +442,9 @@ impl Session {
     }
     pub fn try_read(&mut self, port: Output) -> Result<Option<crate::payload::Frame>, Error> {
         let mut raw = std::ptr::null_mut();
-        match unsafe { gst_runtime_rtp_session_pull(self.inner.0.as_ptr(), port as _, 0, &mut raw) }
-        {
+        match unsafe {
+            gst_runtime_rtp_session_pull(self.inner.raw.as_ptr(), port as _, 0, &mut raw)
+        } {
             0 => unsafe { crate::payload::take_frame(raw) }
                 .map(Some)
                 .map_err(|_| Error(-5)),
@@ -410,7 +454,7 @@ impl Session {
     }
     pub fn report(&mut self, max_delay: Duration) -> Result<bool, Error> {
         let delay = u64::try_from(max_delay.as_nanos()).map_err(|_| Error(-5))?;
-        Ok(unsafe { gst_runtime_rtp_session_report(self.inner.0.as_ptr(), delay) } != 0)
+        Ok(unsafe { gst_runtime_rtp_session_report(self.inner.raw.as_ptr(), delay) } != 0)
     }
     pub fn feedback(&mut self, request: FeedbackRequest) -> Result<bool, Error> {
         let (kind, ssrc, sequence, delay) = match request {
@@ -428,7 +472,7 @@ impl Session {
             FeedbackRequest::FullIntraRequest { ssrc } => (4, ssrc, 0, 0),
         };
         match unsafe {
-            gst_runtime_rtp_session_feedback(self.inner.0.as_ptr(), kind, ssrc, sequence, delay)
+            gst_runtime_rtp_session_feedback(self.inner.raw.as_ptr(), kind, ssrc, sequence, delay)
         } {
             0 => Ok(false),
             1 => Ok(true),
@@ -441,7 +485,7 @@ impl Session {
         let mut builder = StatisticsBuilder::default();
         let result = unsafe {
             gst_runtime_rtp_session_statistics(
-                self.inner.0.as_ptr(),
+                self.inner.raw.as_ptr(),
                 visit_statistic,
                 (&raw mut builder).cast(),
             )
@@ -463,17 +507,50 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[derive(Default)]
+    pub struct Recording(std::sync::Mutex<Vec<(String, i32)>>);
+    impl DiagnosticSink for Recording {
+        fn offer(&self, fact: crate::Fact, _message: &[u8]) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((fact.domain.to_string_lossy().into_owned(), fact.code));
+        }
+    }
+    impl Recording {
+        pub fn assert_none(&self) {
+            assert!(self.0.lock().unwrap().is_empty());
+        }
+        pub fn first(&self) -> Option<(String, i32)> {
+            self.0.lock().unwrap().first().cloned()
+        }
+        pub fn count(&self) -> usize {
+            self.0.lock().unwrap().len()
+        }
+    }
+
     #[cfg(rtp_stop_test)]
     #[test]
     fn close_reads_errors_after_a_cancellation_clone_stopped_first() {
         unsafe extern "C" {
-            fn test_rtp_stop_new(failure: i32, queued: u32, during: u32) -> *mut c_void;
+            fn test_rtp_stop_new(
+                failure: i32,
+                queued: u32,
+                during: u32,
+                sink: *const RawSink,
+            ) -> *mut c_void;
             fn test_rtp_stop_allow_free(session: *mut c_void);
         }
         for failure in [false, true] {
-            let raw = unsafe { test_rtp_stop_new(i32::from(failure), 2, 3) };
+            let rec = Arc::new(Recording::default());
+            let sink: Box<Arc<dyn DiagnosticSink>> = Box::new(rec.clone());
+            let raw_sink = raw_sink(&sink);
+            let raw = unsafe { test_rtp_stop_new(i32::from(failure), 2, 3, &raw_sink) };
             let session = Session {
-                inner: Arc::new(Inner(NonNull::new(raw).unwrap())),
+                inner: Arc::new(Inner {
+                    raw: NonNull::new(raw).unwrap(),
+                    _sink: sink,
+                }),
                 _exclusive: PhantomData,
             };
             let cancellation = session.cancellation();
@@ -487,13 +564,16 @@ mod tests {
                     StateChangeReturn::Success
                 }
             );
-            assert_eq!(outcome.bus_errors, vec![Error(-5); 5]);
+            assert_eq!(outcome.bus_errors, 5);
+            assert_eq!(rec.count(), 5);
+            assert_eq!(rec.first(), Some(("gst-stream-error-quark".into(), 7)));
             cancellation.cancel();
             unsafe { test_rtp_stop_allow_free(raw) };
         }
     }
     #[test]
     fn feedback_abi_enforces_capabilities_and_mapping() {
+        let rec = Arc::new(Recording::default());
         let feedback = Feedback {
             nack: true,
             pli: true,
@@ -519,7 +599,7 @@ mod tests {
             reorder_latency: Some(Duration::from_millis(200)),
             negotiated: None,
         };
-        let mut session = Session::new(config).unwrap();
+        let mut session = Session::new(config, rec.clone()).unwrap();
         assert!(
             !session
                 .feedback(FeedbackRequest::PictureLoss { ssrc: 8 })
@@ -544,18 +624,24 @@ mod tests {
             Some(&Statistic::Uint(0))
         );
         assert!(
-            Session::new(Configuration {
-                reports: None,
-                ..config
-            })
+            Session::new(
+                Configuration {
+                    reports: None,
+                    ..config
+                },
+                rec.clone()
+            )
             .is_err()
         );
         assert!(
-            Session::new(Configuration {
-                reorder_latency: None,
-                negotiated: None,
-                ..config
-            })
+            Session::new(
+                Configuration {
+                    reorder_latency: None,
+                    negotiated: None,
+                    ..config
+                },
+                rec.clone()
+            )
             .is_err()
         );
         let bad = Feedback {
@@ -566,10 +652,13 @@ mod tests {
             ..feedback
         };
         assert!(
-            Session::new(Configuration {
-                feedback: Some(&bad),
-                ..config
-            })
+            Session::new(
+                Configuration {
+                    feedback: Some(&bad),
+                    ..config
+                },
+                rec.clone()
+            )
             .is_err()
         );
         session.cancellation().cancel();
@@ -578,21 +667,27 @@ mod tests {
                 .feedback(FeedbackRequest::PictureLoss { ssrc: 8 })
                 .is_err()
         );
+        drop(session);
+        rec.assert_none();
     }
     #[test]
     fn nonblocking_ports_preserve_packets_and_cancel_full_queues() {
-        let mut s = Session::new(Configuration {
-            ssrc: 7,
-            payload_type: 96,
-            clock_rate: 90000,
-            probation: 0,
-            reports: None,
-            feedback: None,
-            bandwidth_bps: None,
-            payload: None,
-            reorder_latency: None,
-            negotiated: None,
-        })
+        let rec = Arc::new(Recording::default());
+        let mut s = Session::new(
+            Configuration {
+                ssrc: 7,
+                payload_type: 96,
+                clock_rate: 90000,
+                probation: 0,
+                reports: None,
+                feedback: None,
+                bandwidth_bps: None,
+                payload: None,
+                reorder_latency: None,
+                negotiated: None,
+            },
+            rec.clone(),
+        )
         .unwrap();
         let packet = [128, 96, 0, 1, 0, 0, 0, 1, 0, 0, 0, 7, 9];
         assert!(s.try_write(Input::SendRtp, &packet).unwrap());
@@ -649,5 +744,19 @@ mod tests {
         drop(s);
         assert!(start.elapsed() < Duration::from_millis(200));
         drop(cancellation);
+        rec.assert_none();
+    }
+    #[cfg(rtp_stop_test)]
+    #[test]
+    fn a_failed_construction_offers_its_bus_error_before_it_returns() {
+        unsafe extern "C" {
+            fn test_rtp_failing_new(sink: *const RawSink) -> *mut c_void;
+        }
+        let rec = Arc::new(Recording::default());
+        let sink: Box<Arc<dyn DiagnosticSink>> = Box::new(rec.clone());
+        let raw = raw_sink(&sink);
+        assert!(unsafe { test_rtp_failing_new(&raw) }.is_null());
+        drop(sink);
+        assert_eq!(rec.first(), Some(("gst-stream-error-quark".into(), 11)));
     }
 }

@@ -1,4 +1,6 @@
+mod common;
 use boundless_media::sdp::{Description, Parameter};
+use std::sync::Arc;
 #[test]
 #[ignore = "requires independent FFmpeg executable"]
 fn independent_ffmpeg_pcmu_description_retains_actual_payload_mapping() {
@@ -103,13 +105,19 @@ fn selected_description_owns_caps_and_enforces_the_negotiated_track() {
         )
         .is_err()
     );
-    let mut session = rtp::Session::new(rtp::Configuration {
-        negotiated: Some(&selected),
-        ..config
-    })
+    let rec = Arc::new(common::Recording::default());
+    let mut session = rtp::Session::new(
+        rtp::Configuration {
+            negotiated: Some(&selected),
+            ..config
+        },
+        rec.clone(),
+    )
     .unwrap();
     drop(selected);
     assert!(session.statistics().is_ok());
+    drop(session);
+    rec.assert_none();
 }
 
 fn feedback_description(feedback: &[String]) -> String {

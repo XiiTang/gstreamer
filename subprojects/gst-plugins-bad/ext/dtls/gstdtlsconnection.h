@@ -171,6 +171,14 @@ GstFlowReturn gst_dtls_connection_process(GstDtlsConnection *, gpointer ptr, gsi
  */
 GstFlowReturn gst_dtls_connection_send(GstDtlsConnection *, gconstpointer ptr, gsize len, gsize *written, GError **err);
 
+/* Construction-only, one registration. Called under the connection lock for every
+ * originating failure before it is observable; must not re-enter the connection.
+ * data is borrowed through stop_and_join. Refusal (NULL, already installed, or
+ * started/stopped) stores and calls nothing; data remains the caller's. */
+typedef void (*GstDtlsConnectionFailureCallback) (GstDtlsConnection *, const GError *, gpointer);
+gboolean gst_dtls_connection_set_failure_callback (GstDtlsConnection *,
+    GstDtlsConnectionFailureCallback, gpointer data);
+
 G_END_DECLS
 
 #endif /* gstdtlsconnection_h */

@@ -7,6 +7,8 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 
 | Patch | Why | Regression |
 | --- | --- | --- |
+| [DTLS first failure](#dtls-first-failure) | Keep each originating GError before FAILED is observable, with a construction-only callback and runtime first-failure slot | `dtls_timeout.c` timer/consequence, registration and callback/free fences; `dtls_owner.c` real profile mismatch, zero text and close-notify |
+| [RTP first failure](#rtp-stop-outcome-issue-63-batch-4) | Offer every consumed bus error before release, including failed construction, without reconstructing errors from counts | `rtp_stop.c` delayed/in-flight posts, active/stop consumers and construction; Rust RTP and payload callers |
 | [RTSP credential generations](#rtsp-credential-generations) | A connection can acquire current credentials for each authentication exchange while keeping one generation through a Digest challenge | `rtsp::authentication::generation_tests`, the Rust RTSP and keepalive suites |
 | [Payload transforms through the RTP Session](#payload-transforms-through-the-rtp-session) | Split eac7272d01: keep shared typed settings, factories and frames; retire the unused standalone owner and ABI | Production Session frame/raw/pressure regressions and seven native format round trips, with independent FFmpeg pixels |
 | [SDP metadata expansion](#sdp-metadata-expansion-driver-plan-rule-20) | Remove b5bc00f5f8's aggregate quotas; the native parser has no aggregate caps-field or byte capacity | `runtime/rust/tests/sdp.rs` feedback expansion regressions, plus the retained independent FFmpeg fixture |
@@ -45,8 +47,9 @@ bus error for the exclusive owner's consuming `Session::close`. Cancellation
 remains void, cloneable and unable to consume that result. NULL bus auto-flush
 is disabled; the stop checkpoint captures synchronous bus errors and waits
 for in-flight handlers before publishing. Read and close share its lock, so
-no reader takes an error already owned by stop. The current generic error
-representation is preserved.
+no reader takes an error already owned by stop. A borrowed DiagnosticSink receives each error domain, code and message before release,
+including while a failed construction cleans up. Active bus failures return
+GST_FLOW_CUSTOM_ERROR; bus_errors is only a count, never a reconstructed Error(-5).
 
 `runtime/tests/build_rtp_stop.py` and the Rust
 `close_reads_errors_after_a_cancellation_clone_stopped_first` regression
@@ -183,3 +186,23 @@ not acquire, and invalid connections retain their native error. Fixed-source
 validation order is unchanged. This adds the admission query to the private
 native ABI. The Rust library, RTSP and keepalive suites and library/test Clippy
 pass on macOS arm64.
+
+## DTLS first failure
+
+The connection reports every originating timer, SSL and SRTP export failure under
+its lock before FAILED can be observed, even when the caller supplied no GError
+output. The construction-only failure callback cannot be replaced or installed
+after start/stop. The runtime's sole `fail_locked` setter retains the first
+GError domain/code/message; consequences cannot replace it. The accessor lends
+an immortal domain and copies at most the requested message bytes. Runtime-owned
+output, key, application-data, close and fallback failures have distinct codes.
+`gst_runtime_dtls_free` fences callbacks before freeing their data.
+
+Regression evidence: `dtls_timeout.c` forces a timer failure before its later
+READ consequence, checks the runtime slot, registration and an in-flight
+callback across free. `dtls_owner.c` checks a real no-common-profile GError,
+zero-capacity text and peer close-notify (CLOSED before generic PROCESS).
+`rtp_stop.c` forces queue/handler ordering and the stop/free fence, both consumers
+of a queued error and a failed construction. Rust RTP tests exercise the sink
+lifetime through construction, cancellation and consuming close. These are
+native-owner checks; they do not claim Boundless transport acceptance.
