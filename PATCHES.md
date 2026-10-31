@@ -8,6 +8,7 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 | Patch | Why | Regression |
 | --- | --- | --- |
 | [DTLS first failure](#dtls-first-failure) | Keep each originating GError before FAILED is observable, with a construction-only callback and runtime first-failure slot | `dtls_timeout.c` timer/consequence, registration and callback/free fences; `dtls_owner.c` real profile mismatch, zero text and close-notify |
+| [DTLS final failure read](#dtls-final-failure-read-w3-d5) | Read the first failure after the callback fence and before free: free destroys the slot a running timer callback may still fill | `dtls_timeout.c` real gated timer callback across quiesce, and the output cap fact after quiesce; Rust `quiesce_keeps_the_final_failure_readable_until_free` |
 | [RTP first failure](#rtp-stop-outcome-issue-63-batch-4) | Offer every consumed bus error before release, including failed construction, without reconstructing errors from counts | `rtp_stop.c` delayed/in-flight posts, active/stop consumers and construction; Rust RTP and payload callers |
 | [RTSP credential generations](#rtsp-credential-generations) | A connection can acquire current credentials for each authentication exchange while keeping one generation through a Digest challenge | `rtsp::authentication::generation_tests`, the Rust RTSP and keepalive suites |
 | [Payload transforms through the RTP Session](#payload-transforms-through-the-rtp-session) | Split eac7272d01: keep shared typed settings, factories and frames; retire the unused standalone owner and ABI | Production Session frame/raw/pressure regressions and seven native format round trips, with independent FFmpeg pixels |
@@ -215,3 +216,37 @@ RTP/DTLS and payload/SDP owner tests and strict library/test Clippy pass; the
 construction/stop fixture also passes with `--cfg rtp_stop_test`. The direct
 construction fixture initializes the library explicitly, independently of test
 ordering. These checks retain no optional Boundless diagnostic text.
+
+## DTLS final failure read (W3-D5)
+
+`gst_runtime_dtls_free` joins the timer callbacks with
+`gst_dtls_connection_stop_and_join` and then destroys the first-failure slot.
+A timer callback still running when the owner decides to dispose can record
+the association's first failure during that join; a read before free misses
+it and no read is possible after. Boundless's media close must carry that
+failure, so the library needs a point after the fence and before free.
+
+`gst_runtime_dtls_quiesce` calls the existing `stop_and_join` fence without
+holding the runtime mutex (a running callback may take it) and frees nothing;
+free is unchanged and its own call to the fence finds the pool already taken.
+Rust `Association::quiesce(self) -> Quiesced` consumes the association, so a
+stopped association cannot be started or used again; `Quiesced` offers only
+`failure` and frees on drop. No flag, per-operation guard, close-notify or
+second failure record is added.
+
+Upstream (e55686cc) has no runtime layer: `GstDtlsConnection` stop and close
+run under the connection mutex and its liveness owner
+(`gstdtlsconnection.c:525–595`) and elements free the connection by unref. The
+fence this patch reuses is the earlier fork patch's `stop_and_join`.
+
+Regression: `dtls_timeout.c` holds a real timer callback in its failure
+report, quiesces from another thread, and checks that quiesce waits for it,
+that the fact is readable afterwards and that free then releases the native
+state; a second case checks the output-cap fact survives quiesce and a healthy
+association quiesces with no fact. The Rust test reads a verifier rejection
+through `Quiesced` and a healthy handshake's empty slot.
+
+On macOS arm64, from this patch's private static build: `dtls_timeout` exits
+0 (both fence arms and the cap case) and `dtls_interop` exits 0; the Rust DTLS
+tests (4) and strict library/test Clippy pass. These are native-owner checks;
+Boundless's media close and establishment results are its own tests.

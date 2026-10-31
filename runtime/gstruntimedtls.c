@@ -343,6 +343,14 @@ gst_runtime_dtls_failure (GstRuntimeDtls *self, const gchar **domain, gint *code
   return result;
 }
 void
+gst_runtime_dtls_quiesce (GstRuntimeDtls *self)
+{
+  /* The existing callback fence, without freeing the first-failure slot.
+   * Never join under the runtime mutex: a running callback may take it. */
+  if (self && self->connection)
+    gst_dtls_connection_stop_and_join (self->connection);
+}
+void
 gst_runtime_dtls_free (GstRuntimeDtls *self)
 {
   if (!self)

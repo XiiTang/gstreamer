@@ -19,7 +19,11 @@ are separate acceptance gates; the tests here are native-library evidence.
   quark string; capacity zero still returns the fact. Runtime codes distinguish
   output pressure, invalid output/keys, application data, close, start and process.
   The first failure survives later consequences; free joins callbacks before
-  releasing the slot and its callback data.
+  releasing the slot and its callback data. `gst_runtime_dtls_quiesce` runs the
+  same callback fence without freeing, so a failure recorded by a callback
+  during the join is still readable before free. Rust `Association::quiesce`
+  consumes the association into `Quiesced`, which can only read that final
+  failure and free; it sends no close-notify.
 - Supported profiles: AES128_CM_SHA1_80 (30 bytes), AEAD_AES_128_GCM (28 bytes),
   AEAD_AES_256_GCM (44 bytes). Exporter layout is client key, server key, client
   salt, server salt. Native encoder/decoder key signals include the actual length.

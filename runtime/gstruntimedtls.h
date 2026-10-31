@@ -24,6 +24,9 @@ GST_API int gst_runtime_dtls_output (GstRuntimeDtls *, guint8 *, gsize *length);
 /* Take once, only after completed and verified handshake. */
 GST_API int gst_runtime_dtls_take_keys (GstRuntimeDtls *, GstRuntimeDtlsKeys *);
 GST_API int gst_runtime_dtls_fingerprint (GstRuntimeDtls *, guint8 output[32]);
+/* Stop and join all callbacks without freeing; the first failure stays
+ * readable until free. Exclusive, like every other operation. */
+GST_API void gst_runtime_dtls_quiesce (GstRuntimeDtls *);
 /* Stop and join all callbacks before releasing owner and private key material. */
 GST_API void gst_runtime_dtls_free (GstRuntimeDtls *);
 typedef enum {

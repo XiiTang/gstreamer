@@ -6,7 +6,7 @@
 typedef struct {
   GMutex lock; GCond changed;
   gpointer watched, runtime_mutex, disposer;
-  gboolean wrap_next, in_callback, release, disposer_waiting, fence_entered;
+  gboolean wrap_next, in_callback, release, disposer_waiting, fence_entered, quiesce;
   gint seq, callback_done, fence_returned, torn_down, free_returned;
   const gchar *domain; gint code, slot;
 } Probe;
@@ -151,17 +151,26 @@ static gboolean accept (const GstDtlsCertificateDer *chain, gsize length, gpoint
 static gpointer dispose_runtime (gpointer self)
 {
   g_atomic_pointer_set (&probe.disposer, g_thread_self ());
-  gst_runtime_dtls_free (self);
+  if (probe.quiesce)
+    gst_runtime_dtls_quiesce (self);
+  else
+    gst_runtime_dtls_free (self);
   g_mutex_lock (&probe.lock); probe.free_returned = g_atomic_int_add (&probe.seq, 1) + 1;
   g_cond_broadcast (&probe.changed); g_mutex_unlock (&probe.lock); return NULL;
 }
-static void failure_callback_data_outlives_a_running_callback (void)
+static void failure_callback_data_outlives_a_running_callback (gboolean quiesce)
 {
   /* Earlier cases used the wrappers too; only this callback is gated. */
+  probe.quiesce = quiesce;
+  probe.in_callback = probe.release = probe.disposer_waiting = FALSE;
+  probe.slot = probe.code = 0;
   probe.fence_entered = FALSE; probe.fence_returned = probe.torn_down = probe.free_returned = 0;
   probe.wrap_next = TRUE; GstRuntimeDtls *self = NULL;
   g_assert_cmpint (gst_runtime_dtls_create (NULL, "SRTP_AES128_CM_SHA1_80", accept, NULL, &self), ==, 0);
   self->connection->priv->connection_state = GST_DTLS_CONNECTION_STATE_CONNECTING;
+  const gchar *domain; gint code; gsize length;
+  /* The owner's last read before the stop finds nothing. */
+  g_assert_cmpint (gst_runtime_dtls_failure (self, &domain, &code, NULL, 0, &length), ==, 0);
   timeout_result = -1;
   g_atomic_pointer_set (&probe.watched, &self->connection->priv->mutex);
   g_atomic_pointer_set (&probe.runtime_mutex, &self->mutex);
@@ -180,9 +189,50 @@ static void failure_callback_data_outlives_a_running_callback (void)
   g_assert_cmpint (probe.slot, ==, 1); g_assert_cmpstr (probe.domain, ==, "gst-resource-error-quark");
   g_assert_cmpint (probe.code, ==, 1);
   g_assert_cmpint (probe.callback_done, <, probe.fence_returned);
-  g_assert_cmpint (probe.fence_returned, <, probe.torn_down);
-  g_assert_cmpint (probe.torn_down, <, probe.free_returned);
+  if (quiesce)
+    {
+      /* Quiesce waited for the running callback; its fact is final and
+       * still readable before free releases the native state. */
+      g_assert_cmpint (probe.torn_down, ==, 0);
+      g_assert_cmpint (gst_runtime_dtls_failure (self, &domain, &code, NULL, 0, &length), ==, 1);
+      g_assert_cmpstr (domain, ==, "gst-resource-error-quark");
+      g_assert_cmpint (code, ==, GST_RESOURCE_ERROR_FAILED);
+      gst_runtime_dtls_free (self);
+    }
+  else
+    {
+      g_assert_cmpint (probe.fence_returned, <, probe.torn_down);
+      g_assert_cmpint (probe.torn_down, <, probe.free_returned);
+    }
   g_atomic_pointer_set (&probe.watched, NULL); g_atomic_pointer_set (&probe.runtime_mutex, NULL); g_atomic_pointer_set (&probe.disposer, NULL);
+}
+
+static void quiesce_keeps_the_cap_fact_and_adds_none (void)
+{
+  timeout_result = 0;
+  for (guint overflow = 0; overflow != 2; overflow++)
+    {
+      GstRuntimeDtls *self = NULL;
+      g_assert_cmpint (gst_runtime_dtls_create (NULL, "SRTP_AES128_CM_SHA1_80", accept, NULL, &self), ==, 0);
+      g_assert_cmpint (gst_runtime_dtls_start (self, 1), ==, 0);
+      guint8 bytes[65535]; gsize length = sizeof (bytes);
+      g_assert_cmpint (gst_runtime_dtls_output (self, bytes, &length), ==, 1);
+      if (overflow)
+        {
+          for (guint i = 0; i != 32; i++)
+            g_assert_true (send_packet (self->connection, bytes, length, self));
+          g_assert_false (send_packet (self->connection, bytes, length, self));
+        }
+      gst_runtime_dtls_quiesce (self);
+      const gchar *domain; gint code;
+      g_assert_cmpint (gst_runtime_dtls_failure (self, &domain, &code, NULL, 0, &length), ==, overflow);
+      if (overflow)
+        {
+          g_assert_cmpstr (domain, ==, "gst-runtime-dtls-error-quark");
+          g_assert_cmpint (code, ==, GST_RUNTIME_DTLS_ERROR_OUTPUT_FULL);
+        }
+      gst_runtime_dtls_free (self);
+    }
 }
 
 static void
@@ -245,7 +295,9 @@ main (int argc, char **argv)
   timer_failure_is_first_over_its_consequence ();
   runtime_slot_keeps_the_timer_failure ();
   failure_callback_is_construction_only ();
-  failure_callback_data_outlives_a_running_callback ();
+  failure_callback_data_outlives_a_running_callback (FALSE);
+  failure_callback_data_outlives_a_running_callback (TRUE);
+  quiesce_keeps_the_cap_fact_and_adds_none ();
   g_print ("PASS DTLS timeout failure: FAILED, one unlocked notification, stopped timer ignored\n");
   return 0;
 }

@@ -62,6 +62,7 @@ unsafe extern "C" {
         length: *mut usize,
     ) -> i32;
     fn gst_runtime_dtls_free(raw: *mut c_void);
+    fn gst_runtime_dtls_quiesce(raw: *mut c_void);
 }
 unsafe extern "C" fn verify_chain(
     chain: *const CertificateDer,
@@ -87,6 +88,32 @@ unsafe extern "C" fn verify_chain(
     i32::from(result.unwrap_or(false))
 }
 
+/// Reads the first native fact and at most text.len() message bytes.
+fn failure(raw: NonNull<c_void>, text: &mut [u8]) -> Option<(crate::Fact, usize)> {
+    let mut domain = std::ptr::null();
+    let mut code = 0;
+    let mut length = 0;
+    let result = unsafe {
+        gst_runtime_dtls_failure(
+            raw.as_ptr(),
+            &mut domain,
+            &mut code,
+            text.as_mut_ptr(),
+            text.len(),
+            &mut length,
+        )
+    };
+    (result == 1).then(|| {
+        (
+            crate::Fact {
+                // GLib quark strings are never freed.
+                domain: unsafe { std::ffi::CStr::from_ptr(domain) },
+                code,
+            },
+            length,
+        )
+    })
+}
 pub struct Keys {
     pub profile: Profile,
     pub send: Zeroizing<Vec<u8>>,
@@ -106,7 +133,40 @@ impl Drop for Association {
         unsafe { gst_runtime_dtls_free(self.raw.as_ptr()) };
     }
 }
+/// A stopped association: its callbacks have returned, so its first failure
+/// is final. It can only be read, then freed.
+pub struct Quiesced {
+    raw: NonNull<c_void>,
+    _verifier: Box<Verifier>,
+    _exclusive: PhantomData<Cell<()>>,
+}
+// As Association: the callbacks were joined; reading and freeing are exclusive.
+unsafe impl Send for Quiesced {}
+impl Drop for Quiesced {
+    fn drop(&mut self) {
+        unsafe { gst_runtime_dtls_free(self.raw.as_ptr()) };
+    }
+}
+impl Quiesced {
+    /// Reads the final first native fact, as [`Association::failure`].
+    pub fn failure(&mut self, text: &mut [u8]) -> Option<(crate::Fact, usize)> {
+        failure(self.raw, text)
+    }
+}
 impl Association {
+    /// Stops and joins the timer callbacks without freeing, so a failure a
+    /// callback recorded during the join stays readable. Sends no
+    /// close-notify; the association cannot be used again.
+    pub fn quiesce(self) -> Quiesced {
+        let this = std::mem::ManuallyDrop::new(self);
+        unsafe { gst_runtime_dtls_quiesce(this.raw.as_ptr()) };
+        Quiesced {
+            raw: this.raw,
+            // Moved out exactly once; `this` is never dropped.
+            _verifier: unsafe { std::ptr::read(&this._verifier) },
+            _exclusive: PhantomData,
+        }
+    }
     pub fn new(
         pem: Option<&str>,
         profiles: &[Profile],
@@ -165,29 +225,7 @@ impl Association {
     }
     /// Reads the first native fact and at most text.len() message bytes.
     pub fn failure(&mut self, text: &mut [u8]) -> Option<(crate::Fact, usize)> {
-        let mut domain = std::ptr::null();
-        let mut code = 0;
-        let mut length = 0;
-        let result = unsafe {
-            gst_runtime_dtls_failure(
-                self.raw.as_ptr(),
-                &mut domain,
-                &mut code,
-                text.as_mut_ptr(),
-                text.len(),
-                &mut length,
-            )
-        };
-        (result == 1).then(|| {
-            (
-                crate::Fact {
-                    // GLib quark strings are never freed.
-                    domain: unsafe { std::ffi::CStr::from_ptr(domain) },
-                    code,
-                },
-                length,
-            )
-        })
+        failure(self.raw, text)
     }
     pub fn start(&mut self, client: bool) -> Result<(), Error> {
         Error::check(unsafe { gst_runtime_dtls_start(self.raw.as_ptr(), i32::from(client)) })
@@ -324,6 +362,24 @@ mod tests {
             assert!(exchange(&mut client, &mut server).is_err());
             assert!(client.take_keys().is_err());
         }
+    }
+    #[test]
+    fn quiesce_keeps_the_final_failure_readable_until_free() {
+        let profile = Profile::AeadAes128Gcm;
+        let mut client = Association::new(None, &[profile], |_| false).unwrap();
+        let mut server = Association::new(None, &[profile], |_| true).unwrap();
+        assert!(exchange(&mut client, &mut server).is_err());
+        let failed = client.failure(&mut []).map(|(fact, _)| (fact.domain, fact.code));
+        assert!(failed.is_some());
+        let mut client = client.quiesce();
+        assert_eq!(
+            client.failure(&mut []).map(|(fact, _)| (fact.domain, fact.code)),
+            failed
+        );
+        let mut healthy = Association::new(None, &[profile], |_| true).unwrap();
+        let mut peer = Association::new(None, &[profile], |_| true).unwrap();
+        exchange(&mut healthy, &mut peer).unwrap();
+        assert!(healthy.quiesce().failure(&mut []).is_none());
     }
     #[test]
     fn supplied_invalid_identity_is_rejected_and_pending_timer_owner_is_released() {
