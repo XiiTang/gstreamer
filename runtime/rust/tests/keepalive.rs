@@ -135,7 +135,7 @@ fn pump(
     let until = Instant::now() + duration;
     let mut events = Vec::new();
     while Instant::now() < until {
-        if let Some(event) = native.maintain()? {
+        if let Some(event) = native.maintain(|_| None)? {
             events.push(event.kind);
         }
         native.receive_step().0.unwrap();
@@ -162,7 +162,7 @@ fn both_versions_keepalive_is_explicit_cancellable_and_uses_the_same_session() {
             let until = Instant::now() + Duration::from_secs(1);
             let mut sent = false;
             loop {
-                if let Some(event) = native.maintain().unwrap() {
+                if let Some(event) = native.maintain(|_| None).unwrap() {
                     assert_eq!(event.session, "s");
                     match event.kind {
                         KeepaliveEventKind::Sent => sent = true,
@@ -238,7 +238,7 @@ fn cancelling_an_inflight_cycle_retains_its_response_deadline_and_the_confirmed_
         .unwrap();
     let until = Instant::now() + Duration::from_secs(1);
     loop {
-        match native.maintain() {
+        match native.maintain(|_| None) {
             Ok(Some(event)) if matches!(event.kind, KeepaliveEventKind::Sent) => cancel.cancel(),
             Ok(_) => {
                 native.receive_step().0.unwrap();
@@ -292,9 +292,9 @@ fn maintenance_waits_for_explicit_control_and_stops_after_teardown() {
         .unwrap();
     // The native request matcher is occupied; maintenance cannot inject a request.
     thread::sleep(Duration::from_millis(15));
-    assert!(native.maintain().unwrap().is_none());
+    assert!(native.maintain(|_| None).unwrap().is_none());
     receive(&mut native);
-    let event = native.maintain().unwrap().unwrap();
+    let event = native.maintain(|_| None).unwrap().unwrap();
     assert!(matches!(event.kind, KeepaliveEventKind::SessionEnded));
     assert_eq!(peer.requests.try_iter().count(), 1);
 }
@@ -407,7 +407,7 @@ fn keepalives_answer_with_the_connections_digest_session() {
             // 401 is written by the same steps.
             let deadline = Instant::now() + Duration::from_secs(1);
             loop {
-                let event = native.maintain().unwrap();
+                let event = native.maintain(|_| None).unwrap();
                 if matches!(event.map(|e| e.kind), Some(KeepaliveEventKind::Sent))
                     || (statuses.last() == Some(&401) && !native.maintenance_writing())
                 {
@@ -431,7 +431,7 @@ fn keepalives_answer_with_the_connections_digest_session() {
             }
             let message = receive(&mut native);
             statuses.push(message.status);
-            if let Some(event) = native.maintain().unwrap() {
+            if let Some(event) = native.maintain(|_| None).unwrap() {
                 assert!(matches!(
                     event.kind,
                     KeepaliveEventKind::Response { status: 200 }

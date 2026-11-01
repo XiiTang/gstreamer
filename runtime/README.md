@@ -133,16 +133,27 @@ the inherited control/direction and Opus hint interpretation respectively.
 
 Explicit periodic RTSP maintenance is owned by the Rust native adapter on the
 same serialized client. Configure one OPTIONS or GET_PARAMETER cycle per session,
-with a positive interval, write/response deadline and URI. The adapter does not
-derive an interval from the remote Session timeout. The host polls `maintain`
-and `receive_step`, defers its own requests while `maintenance_pending` and its
-other writes while `maintenance_writing`, and continues reading media and server
-requests. A negative response ends that cycle without retry/fallback. Original
-responses still use the ordinary message path. A partial-write/response timeout
-preserves dispatch uncertainty and cancels the control owner. The cancellation
-handle stops future cycles while an already dispatched request retains its
-deadline; this also covers an abandoned configuration handoff. Local timer
-passage never asserts remote session expiry.
+with a positive interval, preparation/write/response deadline and URI. The adapter
+does not derive an interval from the remote Session timeout. The host polls
+`maintain(prepare)` and `receive_step`. For callback authentication, the short
+nonblocking supplier receives a `KeepaliveDue`: `None` keeps preparation pending,
+`Some(Ok(credential))` supplies this exchange, and `Some(Err(error))` rejects it.
+Fixed and unauthenticated clients never call the supplier (`maintain(|_| None)`).
+The selected descriptor compares the existing cancellation allocation and
+scheduled instant; replacement and successive cycles cannot consume one another's
+material. Its original absolute deadline starts at first eligible due selection,
+before preparation, and continues through writer waits and a Digest challenge.
+The host defers ordinary requests while `maintenance_pending`; preparation holds
+no native writer, CSeq or `maintenance_writing`, so reads, media and otherwise
+admissible responses continue. Cancellation at the final configuration/cycle
+check before native admission sends nothing; admission-first retains the actual
+write/response cleanup and deadline. Pre-dispatch expiry emits one Rejected
+TIMEOUT with no CSeq or connection invalidation. An admitted timeout preserves
+actual dispatch uncertainty and cancels the control owner. A negative response
+ends the cycle without retry/fallback. Original responses use the ordinary
+message path. The cancellation handle stops future cycles while an already
+dispatched request retains its deadline; this also covers an abandoned
+configuration handoff. Local timer passage never asserts remote session expiry.
 
 ## Typed RTP session statistics (2026-10-10)
 
@@ -242,7 +253,10 @@ media artifact.
 
 A connection configured with a credential authenticates every request the
 adapter sends for it, keepalives included; the native client itself still never
-retries. Basic is sent with every request, and on RTSP 2.0 only over TLS
+retries. The configured callback supplies ordinary Request exchanges; maintenance
+uses `maintain`'s nonblocking supplier after native admission is available. Both
+enter the same mechanism/length checks and Authorization/Digest construction, and
+an admitted exchange retains its own credential through its 401 answer. Basic is sent with every request, and on RTSP 2.0 only over TLS
 (RFC 7826 section 19.1). Digest uses http-auth's `DigestSession`, which
 Boundless's HTTP and proxy answers use too: a 401 offering a challenge is
 answered once by sending the request again. CSeq advances only as a request is

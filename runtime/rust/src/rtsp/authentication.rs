@@ -77,8 +77,9 @@ struct InFlight {
     proof: Option<ServerProof>,
 }
 
-/// Supplies one credential generation at the start of each request's authentication
-/// exchange. A challenge answer and its server proof keep that same generation.
+/// Supplies one credential generation for an ordinary request's authentication
+/// exchange. Maintenance uses its nonblocking supplier instead. A challenge
+/// answer and its server proof keep the exchange's original generation.
 pub type CredentialCallback = Box<dyn FnMut() -> Result<Credential, Error> + Send>;
 
 enum Source {
@@ -153,6 +154,7 @@ impl Authentication {
         uri: &str,
         headers: &[(&str, &str)],
         body: &[u8],
+        prepared: Option<Credential>,
     ) -> Result<Authorized, Error> {
         if headers
             .iter()
@@ -169,7 +171,10 @@ impl Authentication {
         let credential = match &mut self.source {
             Source::Fixed(credential) => credential.clone(),
             Source::Callback { acquire, basic } => {
-                let credential = acquire()?;
+                let credential = match prepared {
+                    Some(credential) => credential,
+                    None => acquire()?,
+                };
                 if matches!(credential, Credential::Basic(_)) != *basic {
                     return Err(Error::AUTHENTICATION);
                 }
@@ -324,12 +329,12 @@ mod generation_tests {
             true,
         );
         let first = auth
-            .request("OPTIONS", "rtsp://camera/test", &[], &[])
+            .request("OPTIONS", "rtsp://camera/test", &[], &[], None)
             .unwrap();
         assert_eq!(first.headers()[0].1, "Basic first");
         *current.lock().unwrap() = "Basic second".into();
         let next = auth
-            .request("OPTIONS", "rtsp://camera/test", &[], &[])
+            .request("OPTIONS", "rtsp://camera/test", &[], &[], None)
             .unwrap();
         assert_eq!(next.headers()[0].1, "Basic second");
     }
@@ -350,7 +355,7 @@ mod generation_tests {
             false,
         );
         let first = auth
-            .request("OPTIONS", "rtsp://camera/test", &[], &[])
+            .request("OPTIONS", "rtsp://camera/test", &[], &[], None)
             .unwrap();
         assert!(auth.dispatched(first, 1));
         *current.lock().unwrap() = "second".into();
@@ -379,7 +384,7 @@ mod generation_tests {
         assert_eq!(password.as_str(), "first");
         assert_eq!(*reads.lock().unwrap(), 1);
         let next = auth
-            .request("OPTIONS", "rtsp://camera/test", &[], &[])
+            .request("OPTIONS", "rtsp://camera/test", &[], &[], None)
             .unwrap();
         let Credential::Digest { password, .. } = &next.kept().unwrap().credential else {
             panic!("Digest")

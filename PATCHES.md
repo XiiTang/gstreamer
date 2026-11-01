@@ -10,7 +10,7 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 | [DTLS first failure](#dtls-first-failure) | Keep each originating GError before FAILED is observable, with a construction-only callback and runtime first-failure slot | `dtls_timeout.c` timer/consequence, registration and callback/free fences; `dtls_owner.c` real profile mismatch, zero text and close-notify |
 | [DTLS final failure read](#dtls-final-failure-read-w3-d5) | Read the first failure after the callback fence and before free: free destroys the slot a running timer callback may still fill | `dtls_timeout.c` real gated timer callback across quiesce, and the output cap fact after quiesce; Rust `quiesce_keeps_the_final_failure_readable_until_free` |
 | [RTP first failure](#rtp-stop-outcome-issue-63-batch-4) | Offer every consumed bus error before release, including failed construction, without reconstructing errors from counts | `rtp_stop.c` delayed/in-flight posts, active/stop consumers and construction; Rust RTP and payload callers |
-| [RTSP credential generations](#rtsp-credential-generations) | A connection can acquire current credentials for each authentication exchange while keeping one generation through a Digest challenge | `rtsp::authentication::generation_tests`, the Rust RTSP and keepalive suites |
+| [RTSP credential generations](#rtsp-credential-generations) | A connection acquires one generation per exchange; nonblocking maintenance preparation keeps media/control live and preserves that generation through a Digest challenge | `rtsp::authentication::generation_tests`, `rtsp::keepalive::tests`, the Rust RTSP and keepalive suites |
 | [Payload transforms through the RTP Session](#payload-transforms-through-the-rtp-session) | Split eac7272d01: keep shared typed settings, factories and frames; retire the unused standalone owner and ABI | Production Session frame/raw/pressure regressions and seven native format round trips, with independent FFmpeg pixels |
 | [SDP metadata expansion](#sdp-metadata-expansion-driver-plan-rule-20) | Remove b5bc00f5f8's aggregate quotas; the native parser has no aggregate caps-field or byte capacity | `runtime/rust/tests/sdp.rs` feedback expansion regressions, plus the retained independent FFmpeg fixture |
 | [Remove unused RTSP dispatch query](#unused-rtsp-dispatch-query-driver-plan-fork-audit) | Owner-approved removal of b6d8c35a9c; write admission and progress retain their returned `Dispatch` | Rust API and native export probes fail before removal and pass after; native RTSP transport and the whole Rust crate suite |
@@ -18,7 +18,7 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 | [DTLS-SRTP](runtime/README.md#dtls-srtp) | Keys are exported only after a verified peer, for the declared profiles, from one handshake per connection, and are cleansed after use | `runtime/tests/dtls_interop.c` built by `runtime/tests/build_dtls.py`, against an independent OpenSSL DTLS server; `runtime/tests/dtls_owner.c` |
 | [Controlled RTSP and RTP payloads](runtime/README.md#controlled-rtsp-and-rtp-payloads) | The RTSP client and payload transforms run on a stream and frames Boundless supplies, with bounded queues and no resolving, redirects, retries or pipeline strings | `runtime/tests/full_native.py` with FFmpeg fixtures; `runtime/tests/rtsp_transport.c`; `runtime/rust/tests/rtsp.rs` and `payload.rs` |
 | [Private native build](runtime/README.md#controlled-rtsp-and-rtp-payloads) | `build_native.py` builds a private gst-full artifact with only the selected plugins, from hashed wraps, for macOS 13 and Windows | macOS and Windows builds; the deployment-target check rejects newer APIs |
-| [Shared RTP session and SRTP state](runtime/README.md#shared-rtp-session-and-srtp-state) | Direct RTP and RTSP tracks share one owned `rtpsession` with SRTP state, declared feedback and RTX, SDP selection checked natively and explicit keepalive cycles | `runtime/tests/rtp_session.c`, `rtp_feedback.c`, `sdp_selection.c`, `payload.c`; `runtime/rust/tests/sdp.rs` and `keepalive.rs` |
+| [Shared RTP session and SRTP state](runtime/README.md#shared-rtp-session-and-srtp-state) | Direct RTP and RTSP tracks share one owned `rtpsession` with SRTP state, declared feedback and RTX, SDP selection checked natively and explicit keepalive cycles with the nonblocking supply in [RTSP credential generations](#rtsp-credential-generations) | `runtime/tests/rtp_session.c`, `rtp_feedback.c`, `sdp_selection.c`, `payload.c`; `runtime/rust/tests/sdp.rs` and `keepalive.rs` |
 | [Typed RTP session statistics](runtime/README.md#typed-rtp-session-statistics-2026-10-10) | Statistics reach the caller as typed fields, not `gst_structure_to_string` text | `runtime/tests/rtp_session.c`, `rtp_feedback.c`; the crate's `rtp` tests |
 | [RTSP authentication](runtime/README.md#rtsp-authentication-2026-10-06) | A connection's credential authenticates every request through http-auth, a 401 answered once | `runtime/rust/tests/rtsp.rs` and `keepalive.rs` |
 | [Track state after the connection ends](runtime/README.md#track-state-after-the-connection-ends-2026-10-14) | A track keeps the state its last response confirmed; only the client becomes unusable | `runtime/rust/tests/rtsp.rs` `a_track_keeps_its_confirmed_state_when_its_connection_ends`; `runtime/tests/rtsp_transport.c` |
@@ -166,8 +166,9 @@ native harness retains independent FFmpeg pixel checks for its recovered frames.
 
 A fixed connection credential prevented a caller's renewed value from reaching
 later authentication exchanges. `configure_authentication_callback` supplies a
-credential at `Authentication::request`, the checkpoint used by ordinary
-requests and native keepalives. A Digest request owns that acquired credential
+credential for ordinary requests at `Authentication::request`. Maintenance's
+nonblocking supplier enters that same authentication checkpoint with prepared
+material. A Digest request owns that acquired credential
 through its challenge answer; nonce state stays with the authentication owner.
 No callback is invoked for the answer. Without a callback, fixed-credential
 behavior and the existing transport restrictions are unchanged.
@@ -187,6 +188,42 @@ not acquire, and invalid connections retain their native error. Fixed-source
 validation order is unchanged. This adds the admission query to the private
 native ABI. The Rust library, RTSP and keepalive suites and library/test Clippy
 pass on macOS arm64.
+
+The owned keepalive scheduler formerly invoked that synchronous callback on its
+exclusive actor. A held Access Refresh therefore stopped unrelated media and
+control progress. `maintain` now offers one selected `KeepaliveDue` to a
+nonblocking supplier; pending preparation holds no writer or CSeq. Identity is
+only the existing cancellation allocation plus scheduled instant, and the
+original selection-time deadline covers preparation, write and response.
+Cancellation/replacement before final admission discards preparation. Unadmitted
+expiry/acquisition failure rejects only the cycle; admitted failures keep actual
+dispatch and native invalidation. Prepared requests reuse the native admission
+and authentication construction; their Digest answer keeps that same material.
+
+This changes Boundless's own Rust scheduler, not upstream `rtspsrc`:
+`gst_rtspsrc_send_keep_alive` constructs/sends its own keepalive and warns on
+failure, with no Access Refresh. Its C transport, cancellation/flush, response
+correlation and retry behavior are unchanged. The owned runtime keeps its
+write-first admission, earliest due selection, active-session checks, response
+events and dispatched timeout handling; it adds the distinct unstarted rejection
+without restarting the original allowance.
+
+`rtsp::keepalive::tests::pending_supply_keeps_reads_live_and_one_generation_through_challenge`
+drives both versions' paired-stream reads, pending identity, one supplied Digest
+generation and a fresh next cycle. `selected_supply_obeys_cancellation_replacement_and_original_deadline`
+drives disable/replacement, final cancellation and error precedence, pre-dispatch
+rejection and admitted timeout through a private native-clock seam. Boundless's
+held-Refresh regressions cover the shared Request/maintenance preparation owner
+and Program-visible media/control progress in the consumer's pin update.
+
+On macOS arm64 with Rust 1.97, this work revision (based on `81e61dd4`) passes
+both new native test families, the authentication unit tests, existing keepalive
+integration tests, the in-flight 401/CSeq regression and strict library/test
+Clippy (all exit 0). A negative control that restores the former synchronous
+maintenance-source route fails the pending-supply regression (exit 101): the
+ordinary source is called once while preparation is pending, where zero calls
+are required. Restoring the seam passes. These results establish this native
+checkpoint, not Linux/Windows or full Boundless acceptance.
 
 ## DTLS first failure
 

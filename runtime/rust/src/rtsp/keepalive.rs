@@ -2,7 +2,7 @@
 //! session keepalives, and a request sent again with the answer to its 401.
 //! The caller polls this with receive_step; no thread, socket or alternate
 //! identity.
-use super::{Dispatch, Error, Message, Rtsp, text};
+use super::{Credential, Dispatch, Error, Message, Rtsp, text};
 use std::{
     collections::BTreeMap,
     ffi::{c_char, c_void},
@@ -31,7 +31,7 @@ pub struct Keepalive {
     pub uri: String,
     pub method: KeepaliveMethod,
     pub interval: Duration,
-    /// Bounds the complete keepalive write and response, not the remote session.
+    /// Bounds preparation, write and response from the first eligible due selection.
     pub response_timeout: Duration,
 }
 #[derive(Clone)]
@@ -43,6 +43,39 @@ impl KeepaliveCancellation {
     }
     fn cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
+    }
+}
+/// One selected maintenance exchange. Clones identify the same configuration
+/// and scheduled cycle; pending polls keep its original absolute deadline.
+#[derive(Clone)]
+pub struct KeepaliveDue {
+    session: String,
+    next: Instant,
+    deadline: Instant,
+    cancel: KeepaliveCancellation,
+}
+impl std::fmt::Debug for KeepaliveDue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeepaliveDue")
+            .field("session", &self.session)
+            .field("next", &self.next)
+            .field("deadline", &self.deadline)
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+impl PartialEq for KeepaliveDue {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cancel.0, &other.cancel.0) && self.next == other.next
+    }
+}
+impl Eq for KeepaliveDue {}
+impl KeepaliveDue {
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.cancelled()
     }
 }
 #[derive(Clone, Debug)]
@@ -91,6 +124,9 @@ struct Pending {
 pub(super) struct State {
     schedules: BTreeMap<String, Scheduled>,
     pending: Option<Pending>,
+    selected: Option<KeepaliveDue>,
+    #[cfg(test)]
+    clock: Option<Arc<std::sync::Mutex<Instant>>>,
     event: Option<KeepaliveEvent>,
 }
 unsafe extern "C" {
@@ -130,7 +166,7 @@ impl Rtsp {
         {
             return Err(Error::INVALID);
         }
-        let now = Instant::now();
+        let now = self.keepalives.now();
         let next = now.checked_add(options.interval).ok_or(Error::INVALID)?;
         now.checked_add(options.response_timeout)
             .ok_or(Error::INVALID)?;
@@ -167,7 +203,8 @@ impl Rtsp {
     /// A request the owner sends itself is due, being written or awaiting its
     /// response: the caller's own requests wait.
     pub fn maintenance_pending(&self) -> bool {
-        self.keepalives.pending.is_some()
+        self.keepalives.selected.is_some()
+            || self.keepalives.pending.is_some()
             || self.authentication.as_ref().is_some_and(|auth| auth.busy())
     }
     /// A request the owner sends itself is being written: other writes wait.
@@ -182,7 +219,15 @@ impl Rtsp {
     /// answer, then declared keepalives. Responses still leave through
     /// receive_step with their original headers, body and authentication
     /// evidence.
-    pub fn maintain(&mut self) -> Result<Option<KeepaliveEvent>, MaintenanceFailure> {
+    /// `prepare` is called only for callback authentication, after native
+    /// admission is available. It must not block: None keeps this exchange
+    /// pending, while a ready result supplies or rejects only this exchange.
+    /// Cancellation before final admission sends nothing. Preparation consumes
+    /// the same original response allowance as the admitted write and response.
+    pub fn maintain(
+        &mut self,
+        mut prepare: impl FnMut(&KeepaliveDue) -> Option<Result<Credential, Error>>,
+    ) -> Result<Option<KeepaliveEvent>, MaintenanceFailure> {
         self.answer_step()
             .map_err(|(dispatch, error)| MaintenanceFailure {
                 session: None,
@@ -190,12 +235,19 @@ impl Rtsp {
                 error,
             })?;
         let mut state = std::mem::take(&mut self.keepalives);
-        let result = state.step(self);
+        let result = state.step(self, &mut prepare);
         self.keepalives = state;
         result
     }
 }
 impl State {
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(clock) = &self.clock {
+            return *clock.lock().unwrap();
+        }
+        Instant::now()
+    }
     pub(super) fn observe(&mut self, complete: bool, message: &Message) {
         // The C engine already correlated this response to its sole outstanding
         // request. Do not reparse CSeq or maintain a second response matcher here.
@@ -217,9 +269,10 @@ impl State {
         let Some(pending) = self.pending.take() else {
             return;
         };
+        let now = self.now();
         if let Some(schedule) = self.schedules.get_mut(&pending.session) {
             if (200..300).contains(&message.status) {
-                if let Some(next) = Instant::now().checked_add(schedule.options.interval) {
+                if let Some(next) = now.checked_add(schedule.options.interval) {
                     schedule.next = next;
                 } else {
                     schedule.cancel.cancel();
@@ -236,12 +289,16 @@ impl State {
             },
         });
     }
-    fn step(&mut self, native: &mut Rtsp) -> Result<Option<KeepaliveEvent>, MaintenanceFailure> {
+    fn step(
+        &mut self,
+        native: &mut Rtsp,
+        prepare: &mut impl FnMut(&KeepaliveDue) -> Option<Result<Credential, Error>>,
+    ) -> Result<Option<KeepaliveEvent>, MaintenanceFailure> {
         if let Some(event) = self.event.take() {
             return Ok(Some(event));
         }
         if let Some(mut pending) = self.pending.take() {
-            let failure = if Instant::now() >= pending.deadline {
+            let failure = if self.now() >= pending.deadline {
                 Some(Error::TIMEOUT)
             } else if pending.writing {
                 let (result, dispatch) = native.write_step();
@@ -277,76 +334,152 @@ impl State {
             self.pending = Some(pending);
             return Ok(None);
         }
-        // A cancelled declaration never starts another request. Retire it only
-        // after its already-dispatched response has been observed or timed out.
+        // Cancellation cannot retire admitted work before its response/deadline.
         self.schedules.retain(|_, value| !value.cancel.cancelled());
+        if let Some(event) = self.check_selected(native) {
+            return Ok(Some(event));
+        }
         if unsafe { crate::ffi::gst_runtime_rtsp_request_ready(native.inner.0.as_ptr()) } == 0 {
             return Ok(None);
         }
-        let now = Instant::now();
-        let Some(session) = self
-            .schedules
-            .iter()
-            .filter(|(_, v)| v.next <= now)
-            .min_by_key(|(_, v)| v.next)
-            .map(|(k, _)| k.clone())
-        else {
+        if self.selected.is_none() {
+            let now = self.now();
+            let Some((session, schedule)) = self
+                .schedules
+                .iter()
+                .filter(|(_, schedule)| schedule.next <= now)
+                .min_by_key(|(_, schedule)| schedule.next)
+            else {
+                return Ok(None);
+            };
+            let Some(deadline) = now.checked_add(schedule.options.response_timeout) else {
+                schedule.cancel.cancel();
+                return Ok(Some(KeepaliveEvent {
+                    session: session.clone(),
+                    sequence: None,
+                    kind: KeepaliveEventKind::Rejected {
+                        error: Error::INVALID,
+                    },
+                }));
+            };
+            self.selected = Some(KeepaliveDue {
+                session: session.clone(),
+                next: schedule.next,
+                deadline,
+                cancel: schedule.cancel.clone(),
+            });
+        }
+        if let Some(event) = self.check_selected(native) {
+            return Ok(Some(event));
+        }
+        let Some(due) = self.selected.clone() else {
             return Ok(None);
         };
-        if !active(native, &session).unwrap_or(false) {
-            self.schedules.remove(&session);
-            return Ok(Some(KeepaliveEvent {
-                session,
-                sequence: None,
-                kind: KeepaliveEventKind::SessionEnded,
-            }));
+        // Exclusive native ownership keeps this admission available through
+        // the short supplier call; no native writer is held by preparation.
+        match native.authentication_ready() {
+            Ok(true) => {}
+            Ok(false) => return Ok(None),
+            Err(error) => return Ok(Some(self.reject_selected(error))),
         }
-        let schedule = self.schedules.get(&session).unwrap();
-        let Some(deadline) = now.checked_add(schedule.options.response_timeout) else {
-            schedule.cancel.cancel();
-            return Ok(Some(KeepaliveEvent {
-                session,
-                sequence: None,
-                kind: KeepaliveEventKind::Rejected {
-                    error: Error::INVALID,
-                },
-            }));
+        let supplied = if native
+            .authentication
+            .as_ref()
+            .is_some_and(|auth| auth.acquires())
+        {
+            let Some(result) = prepare(&due) else {
+                return Ok(None);
+            };
+            if let Some(event) = self.check_selected(native) {
+                return Ok(Some(event));
+            }
+            if self.selected.is_none() {
+                return Ok(None);
+            }
+            match result {
+                Ok(credential) => Some(credential),
+                Err(error) => return Ok(Some(self.reject_selected(error))),
+            }
+        } else {
+            None
         };
-        let headers = [("Session", session.as_str())];
-        let (result, dispatch) = native.request_begin(
+        if let Some(event) = self.check_selected(native) {
+            return Ok(Some(event));
+        }
+        if self.selected.is_none() {
+            return Ok(None);
+        }
+        let schedule = self.schedules.get(due.session()).unwrap();
+        let headers = [("Session", due.session())];
+        let (result, dispatch) = native.request_begin_with(
             schedule.options.method.name(),
             &schedule.options.uri,
             &headers,
             &[],
+            supplied,
         );
         match result {
             Ok(true) => {
+                self.selected = None;
                 self.pending = Some(Pending {
-                    session,
-                    deadline,
+                    session: due.session,
+                    deadline: due.deadline,
                     dispatch,
                     writing: true,
                 });
-                self.step(native)
+                self.step(native, prepare)
             }
             Ok(false) => Ok(None),
             Err(error) => {
-                schedule.cancel.cancel();
                 if dispatch.may_have_been_sent {
+                    self.selected.take().unwrap().cancel.cancel();
                     unsafe { crate::ffi::gst_runtime_rtsp_invalidate(native.inner.0.as_ptr()) };
                     Err(MaintenanceFailure {
-                        session: Some(session),
+                        session: Some(due.session),
                         dispatch,
                         error,
                     })
                 } else {
-                    Ok(Some(KeepaliveEvent {
-                        session,
-                        sequence: None,
-                        kind: KeepaliveEventKind::Rejected { error },
-                    }))
+                    Ok(Some(self.reject_selected(error)))
                 }
             }
         }
     }
+    fn reject_selected(&mut self, error: Error) -> KeepaliveEvent {
+        let due = self.selected.take().expect("selected maintenance exchange");
+        due.cancel.cancel();
+        KeepaliveEvent {
+            session: due.session,
+            sequence: None,
+            kind: KeepaliveEventKind::Rejected { error },
+        }
+    }
+    /// Validate again after readiness, immediately before native admission.
+    fn check_selected(&mut self, native: &Rtsp) -> Option<KeepaliveEvent> {
+        let due = self.selected.as_ref()?;
+        let current = self.schedules.get(due.session()).is_some_and(|schedule| {
+            Arc::ptr_eq(&schedule.cancel.0, &due.cancel.0) && schedule.next == due.next
+        });
+        if !current || due.is_cancelled() {
+            self.selected = None;
+            return None;
+        }
+        if !active(native, due.session()).unwrap_or(false) {
+            let due = self.selected.take().unwrap();
+            due.cancel.cancel();
+            self.schedules.remove(due.session());
+            return Some(KeepaliveEvent {
+                session: due.session,
+                sequence: None,
+                kind: KeepaliveEventKind::SessionEnded,
+            });
+        }
+        if self.now() >= due.deadline {
+            return Some(self.reject_selected(Error::TIMEOUT));
+        }
+        None
+    }
 }
+
+#[cfg(all(test, unix))]
+mod tests;

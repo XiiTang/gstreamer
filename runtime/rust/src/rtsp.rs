@@ -3,8 +3,8 @@ mod keepalive;
 use crate::{Error, ffi, initialize};
 pub use authentication::{Credential, CredentialCallback, Observation};
 pub use keepalive::{
-    Keepalive, KeepaliveCancellation, KeepaliveEvent, KeepaliveEventKind, KeepaliveMethod,
-    KeepaliveStatus, MaintenanceFailure,
+    Keepalive, KeepaliveCancellation, KeepaliveDue, KeepaliveEvent, KeepaliveEventKind,
+    KeepaliveMethod, KeepaliveStatus, MaintenanceFailure,
 };
 use std::{
     cell::Cell,
@@ -225,8 +225,9 @@ impl Rtsp {
         self.authentication = Some(authentication);
         Ok(())
     }
-    /// Acquires a credential once per authentication exchange, including keepalives.
-    /// A challenge answer uses the generation acquired for its original request.
+    /// Acquires a credential once per ordinary request authentication exchange.
+    /// Maintenance supplies its prepared credential through `maintain` instead.
+    /// A challenge answer keeps the generation of its original exchange.
     /// `basic` fixes the mechanism and applies the ordinary RTSP transport rule.
     pub fn configure_authentication_callback(
         &mut self,
@@ -361,25 +362,42 @@ impl Rtsp {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> (Result<bool, Error>, Dispatch) {
-        let Some(auth) = self.authentication.as_mut() else {
-            return self.begin(method, uri, headers, body);
+        self.request_begin_with(method, uri, headers, body, None)
+    }
+    fn authentication_ready(&self) -> Result<bool, Error> {
+        let Some(auth) = self.authentication.as_ref() else {
+            return Ok(true);
         };
         if auth.busy() {
-            return (Ok(false), Dispatch::default());
+            return Ok(false);
         }
         if auth.acquires() {
-            // Share native request_mode's writer-first admission checkpoint.
-            // Fixed credentials retain their existing validation behavior.
             let admission =
                 unsafe { ffi::gst_runtime_rtsp_request_admission(self.inner.0.as_ptr()) };
             if admission == 1 {
-                return (Ok(false), Dispatch::default());
+                return Ok(false);
             }
-            if let Err(error) = Error::check(admission) {
-                return (Err(error), Dispatch::default());
-            }
+            Error::check(admission)?;
         }
-        let request = match auth.request(method, uri, headers, body) {
+        Ok(true)
+    }
+    fn request_begin_with(
+        &mut self,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        prepared: Option<Credential>,
+    ) -> (Result<bool, Error>, Dispatch) {
+        match self.authentication_ready() {
+            Ok(true) => {}
+            Ok(false) => return (Ok(false), Dispatch::default()),
+            Err(error) => return (Err(error), Dispatch::default()),
+        }
+        let Some(auth) = self.authentication.as_mut() else {
+            return self.begin(method, uri, headers, body);
+        };
+        let request = match auth.request(method, uri, headers, body, prepared) {
             Ok(request) => request,
             Err(error) => return (Err(error), Dispatch::default()),
         };

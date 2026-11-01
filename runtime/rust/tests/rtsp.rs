@@ -456,7 +456,7 @@ fn a_401_answered_while_data_is_written_keeps_the_cseq_it_named() {
     server.read_exact(&mut wire).unwrap();
     assert_eq!(wire, [b'$', 4, 0, 3, 0, 255, 1]);
     while {
-        client.maintain().unwrap();
+        client.maintain(|_| None).unwrap();
         client.maintenance_writing()
     } {
         assert!(Instant::now() < end);
