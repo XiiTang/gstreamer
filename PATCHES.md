@@ -217,9 +217,12 @@ held-Refresh regressions cover the shared Request/maintenance preparation owner
 and Program-visible media/control progress in the consumer's pin update.
 
 On macOS arm64 with Rust 1.97, this work revision (based on `81e61dd4`) passes
-both new native test families, the authentication unit tests, existing keepalive
-integration tests, the in-flight 401/CSeq regression and strict library/test
-Clippy (all exit 0). A negative control that restores the former synchronous
+both new native test families, existing keepalive integration tests, the
+in-flight 401/CSeq regression and strict library/test Clippy (all exit 0).
+The original `rtsp::authentication::tests::` filter selected zero tests and
+provided no authentication unit-test evidence. A follow-up run of
+`rtsp::authentication::generation_tests` selected and passed both credential
+generation tests (exit 0). A negative control that restores the former synchronous
 maintenance-source route fails the pending-supply regression (exit 101): the
 ordinary source is called once while preparation is pending, where zero calls
 are required. Restoring the seam passes. These results establish this native
