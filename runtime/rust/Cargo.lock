@@ -92,7 +92,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 [[package]]
 name = "http-auth"
 version = "0.1.10"
-source = "git+https://github.com/XiiTang/http-auth?rev=34480d3269432be018d4d7bda1e079d8bf0d87bc#b3d729d4e0980c59b1720d48a29f10a3d4d7363b"
+source = "git+https://github.com/XiiTang/http-auth?rev=73ddc424dafdd1a9625c4b20cc7afe204a0bd0cf#73ddc424dafdd1a9625c4b20cc7afe204a0bd0cf"
 dependencies = [
  "base64",
  "digest",
