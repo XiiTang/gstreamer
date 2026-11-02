@@ -248,6 +248,8 @@ unsafe extern "C" {
         timeout: u64,
         frame: *mut *mut c_void,
     ) -> i32;
+    fn gst_runtime_rtp_session_end_input(session: *mut c_void, port: i32) -> i32;
+    fn gst_runtime_rtp_session_output_ended(session: *mut c_void, port: i32) -> i32;
     fn gst_runtime_rtp_session_report(session: *mut c_void, delay: u64) -> i32;
     fn gst_runtime_rtp_session_feedback(
         session: *mut c_void,
@@ -451,6 +453,19 @@ impl Session {
             1 => Ok(None),
             code => Err(Error(code)),
         }
+    }
+    /// Ends `port`'s input: what it accepted before still flows through
+    /// the session, then end-of-stream.
+    pub fn end_input(&mut self, port: Input) -> Result<(), Error> {
+        match unsafe { gst_runtime_rtp_session_end_input(self.inner.raw.as_ptr(), port as _) } {
+            0 => Ok(()),
+            code => Err(Error(code)),
+        }
+    }
+    /// Whether `port`'s output reached end-of-stream with every frame before
+    /// it read.
+    pub fn output_ended(&mut self, port: Output) -> bool {
+        unsafe { gst_runtime_rtp_session_output_ended(self.inner.raw.as_ptr(), port as _) != 0 }
     }
     pub fn report(&mut self, max_delay: Duration) -> Result<bool, Error> {
         let delay = u64::try_from(max_delay.as_nanos()).map_err(|_| Error(-5))?;

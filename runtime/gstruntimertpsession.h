@@ -43,6 +43,13 @@ int gst_runtime_rtp_session_try_write (GstRuntimeRtpSession *session, int port, 
 GST_API
 int gst_runtime_rtp_session_try_write_frame (GstRuntimeRtpSession *session, const guint8 *data,
                                              gsize length, guint64 pts, guint64 duration);
+/* Ends an input port: what it accepted before still flows, then EOS.
+ * 0 ended, negative flow error (flushing once stopped). */
+GST_API
+int gst_runtime_rtp_session_end_input (GstRuntimeRtpSession *session, int port);
+/* TRUE once an output port's EOS arrived and every sample before it was read. */
+GST_API
+gboolean gst_runtime_rtp_session_output_ended (GstRuntimeRtpSession *session, int port);
 GST_API
 int gst_runtime_rtp_session_pull (GstRuntimeRtpSession *session, int port, guint64 timeout,
                                   GstRuntimePayloadFrame **frame);

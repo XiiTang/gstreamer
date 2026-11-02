@@ -387,6 +387,27 @@ gst_runtime_rtp_session_try_write_frame (GstRuntimeRtpSession *s, const guint8 *
   return result;
 }
 int
+gst_runtime_rtp_session_end_input (GstRuntimeRtpSession *s, int port)
+{
+  if (!s || port < 0 || port > 2)
+    return GST_FLOW_ERROR;
+  if (g_atomic_int_get (&s->stopped))
+    return GST_FLOW_FLUSHING;
+  g_mutex_lock (&s->writers[port]);
+  /* appsrc queues EOS behind the buffers it already accepted. */
+  GstFlowReturn result = gst_app_src_end_of_stream (GST_APP_SRC (s->source[port]));
+  g_mutex_unlock (&s->writers[port]);
+  return result;
+}
+gboolean
+gst_runtime_rtp_session_output_ended (GstRuntimeRtpSession *s, int port)
+{
+  if (!s || port < 0 || port > 2 || (port == 2 && !s->settings.reports))
+    return FALSE;
+  /* True only once EOS reached the sink and every sample before it was pulled. */
+  return gst_app_sink_is_eos (GST_APP_SINK (s->sink[port]));
+}
+int
 gst_runtime_rtp_session_write (GstRuntimeRtpSession *s, int port, const guint8 *data, gsize length)
 {
   int result;

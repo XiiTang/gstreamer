@@ -24,6 +24,7 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 | [Track state after the connection ends](runtime/README.md#track-state-after-the-connection-ends-2026-10-14) | A track keeps the state its last response confirmed; only the client becomes unusable | `runtime/rust/tests/rtsp.rs` `a_track_keeps_its_confirmed_state_when_its_connection_ends`; `runtime/tests/rtsp_transport.c` |
 | [A reply whose proof fails changes no track](runtime/README.md#a-reply-whose-proof-fails-changes-no-track-2026-10-15) | A Digest request's final response changes a track only once its proof is accepted | `runtime/rust/tests/rtsp.rs` `a_reply_whose_digest_proof_fails_changes_no_track` |
 | [H264/H265 dropped RTP extensions](runtime/README.md#h264h265-dropped-rtp-extensions-2026-10-02) | Upstream MR !12389, backported: a dropped FU or NAL clears its delayed header extensions | `runtime/tests/depay_extensions.c` in `runtime/tests/full_native.py` |
+| [RTP session end of input](#rtp-session-end-of-input-boundless-453) | A receive failure ends the session's input instead of abandoning it: what native already accepted (appsrc, `rtpsession`, jitterbuffer) still reaches the reader, and the reader learns when it has all of it | `runtime/tests/rtp_session.c` end-of-input drain in `runtime/tests/full_native.py`; Boundless `rtp::tests::relayed_packets_precede_the_relays_broken_datagram` |
 | Rename project integration to Boundless | The runtime crate and build name the project | Builds |
 
 ## DTLS timeout failure (issue #63, batch 4)
@@ -290,3 +291,37 @@ On macOS arm64, from this patch's private static build: `dtls_timeout` exits
 0 (both fence arms and the cap case) and `dtls_interop` exits 0; the Rust DTLS
 tests (4) and strict library/test Clippy pass. These are native-owner checks;
 Boundless's media close and establishment results are its own tests.
+
+## RTP session end of input (Boundless #453)
+
+When a Runtime's receive socket fails, the packets it already wrote into the
+session's inbound port may still be inside native: queued in appsrc, in
+`rtpsession`, or held by the jitterbuffer for its latency. Boundless must hand
+them to the program before it reports the failure, and must know when there
+is nothing more to read. The runtime had no way to say "no more input" for one
+port, and no way to see that an output port had delivered its last sample.
+
+`gst_runtime_rtp_session_end_input(session, port)` (Rust
+`rtp::Session::end_input`) calls `gst_app_src_end_of_stream` on that input
+port's appsrc under the port's writer lock;
+`gst_runtime_rtp_session_output_ended(session, port)` (Rust
+`rtp::Session::output_ended`) returns `gst_app_sink_is_eos` for that output
+port. Both are thin uses of upstream behaviour, with no change to any element:
+appsrc queues EOS behind the buffers it already accepted
+(`gstappsrc.c`, `gst_app_src_end_of_stream`); `rtpsession` forwards EOS on
+`recv_rtp_src` after the buffers before it (`gstrtpsession.c`,
+`gst_rtp_session_event_recv_rtp_sink`); the jitterbuffer queues EOS as an item
+after the packets it holds, stops buffering, keeps pushing across gaps once EOS
+is set and sends EOS only when its queue is empty (`gstrtpjitterbuffer.c`,
+`queue_event` and `handle_next_buffer`); and appsink reports EOS only once EOS
+has arrived and every queued sample was pulled (`gstappsink.c`,
+`gst_app_sink_is_eos`). A packet the jitterbuffer has not yet released for its
+first deadline still waits for that deadline, so a reader drains within the
+session's latency; Boundless bounds the drain by its worker's own deadline.
+
+`runtime/tests/rtp_session.c` writes three packets into an inbound port with
+reordering on (latency 500 ms), checks none is out yet and the output has not
+ended, ends the input, reads the three in order, and then sees the output end.
+With `end_input` reduced to a no-op the test fails (exit 134: the output never
+ends within 5 s); with the patch it passes (exit 0) in
+`runtime/tests/full_native.py` on macOS arm64.

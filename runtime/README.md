@@ -155,6 +155,17 @@ message path. The cancellation handle stops future cycles while an already
 dispatched request retains its deadline; this also covers an abandoned
 configuration handoff. Local timer passage never asserts remote session expiry.
 
+## Ending an RTP session's input (Boundless #453)
+
+`end_input(port)` ends one input port: what that port already accepted keeps
+flowing through `rtpsession`, the jitterbuffer and any decoder, followed by
+end-of-stream. `output_ended(port)` is true once that EOS reached the output
+port's appsink and every sample before it was read. A Runtime whose receive
+socket fails ends the receive port, reads it until `output_ended`, and only
+then reports the failure. The jitterbuffer still releases a packet waiting for
+its first deadline at that deadline, so the drain takes at most the declared
+latency. Regression: `runtime/tests/rtp_session.c` (end-of-input drain).
+
 ## Typed RTP session statistics (2026-10-10)
 
 `gst_runtime_rtp_session_statistics` walks the session's statistics structure

@@ -197,7 +197,47 @@ main (int argc, char **argv)
   gst_runtime_rtp_session_free (a);
   test_sink_assert_none (&as);
   g_assert_cmpint (g_get_monotonic_time () - start, <, 200000);
-  g_print ("RTP session: raw fields/rollover, native RR/stats, declared reports, full queue stop "
+  /* Ending the inbound input drains what the session already accepted: the
+   * jitterbuffer still holds the packets for its latency, they come out in
+   * order, and only then does the output report its end. */
+  GstRuntimeRtpSettings ordered = { 8, 96, 90000, 0, 10 * GST_MSECOND, FALSE, 0 };
+  ordered.reorder = TRUE;
+  ordered.latency_ms = 500;
+  TestSink os = { 0 };
+  GstRuntimeDiagnosticSink o_sink = test_sink (&os);
+  GstRuntimeRtpSession *o = gst_runtime_rtp_session_new (&ordered, &o_sink);
+  g_assert_nonnull (o);
+  for (int i = 0; i < 3; i++)
+    {
+      memcpy (original, rtp, sizeof (rtp));
+      original[2] = 0;
+      original[3] = 10 + i;
+      g_assert_cmpint (gst_runtime_rtp_session_write (o, 1, original, sizeof (original)), ==, 0);
+    }
+  g_assert_cmpint (
+      gst_runtime_rtp_session_read (o, 1, buffer, sizeof (buffer), &length, 100 * GST_MSECOND), ==,
+      1);
+  g_assert_false (gst_runtime_rtp_session_output_ended (o, 1));
+  g_assert_cmpint (gst_runtime_rtp_session_end_input (o, 1), ==, 0);
+  for (int i = 0; i < 3; i++)
+    {
+      g_assert_cmpint (
+          gst_runtime_rtp_session_read (o, 1, buffer, sizeof (buffer), &length, 5 * GST_SECOND), ==,
+          0);
+      g_assert_cmpuint (buffer[3], ==, 10 + i);
+    }
+  gint64 drained = g_get_monotonic_time ();
+  while (!gst_runtime_rtp_session_output_ended (o, 1))
+    {
+      g_assert_cmpint (g_get_monotonic_time () - drained, <, 5000000);
+      g_assert_cmpint (
+          gst_runtime_rtp_session_read (o, 1, buffer, sizeof (buffer), &length, 10 * GST_MSECOND),
+          ==, 1);
+    }
+  gst_runtime_rtp_session_free (o);
+  test_sink_assert_none (&os);
+  g_print ("RTP session: raw fields/rollover, native RR/stats, declared reports, full queue stop, "
+           "end of input drains "
            "passed\n");
   return 0;
 }
