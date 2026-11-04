@@ -4135,6 +4135,9 @@ handle_next_buffer (GstRtpJitterBuffer * jitterbuffer)
    * previous packet seqnum assume no gap. */
   if (G_UNLIKELY (next_seqnum == -1)) {
     GST_DEBUG_OBJECT (jitterbuffer, "First buffer #%d", seqnum);
+    /* The chain may have seen a serialized event ahead of this buffer. */
+    if (gst_rtp_jitter_buffer_fast_start (jitterbuffer))
+      update_current_timer (jitterbuffer);
     /* we don't know what the next_seqnum should be, the chain function should
      * have scheduled a DEADLINE timer that will increment next_seqnum when it
      * fires, so wait for that */

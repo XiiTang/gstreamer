@@ -1,3 +1,5 @@
+# Boundless patches
+
 ## Functional RTP repair fixture startup (#403, #348)
 
 The runtime adds `gst_runtime_rtp_session_new_with_test_faststart` in the ordinary
@@ -25,17 +27,72 @@ at PTS plus latency; increasing latency alone therefore holds initial output.
 pushes contiguous packets immediately and waits at gaps. The existing
 `get_rtx_delay` requests missing packets from spacing/jitter (capped by latency
 minus RTT); retry period and default request deadline still depend on latency.
-This constructor changes no upstream algorithm, clock or timer; it separates
-fixture startup from the unexercised window. Exact expiry/retry-count tests
-remain upstream's GstHarness/GstTestClock tests. No GstCheck build flavor or
+The explicit constructor separates fixture startup from that window, with the
+shared startup correction below. Exact expiry/retry-count tests remain
+upstream's GstHarness/GstTestClock tests. No GstCheck build flavor or
 staging/provenance change is needed.
 
-Regression entry: `runtime/tests/rtp_feedback.c`, built against this commit's
-ordinary gst-full artifact (`runtime/tests/full_native.py` or the same compiler
-and pkg-config inputs for that one fixture). Execution results are recorded by
-the integrating revision/platform; this record does not claim an unrun pass.
+### Re-evaluate fast-start after serialized setup
 
-# Boundless patches
+With faststart=1, A can enter the jitter queue while CAPS/SEGMENT still precede
+it. The input chain's only fast-start attempt looks up a DEADLINE using the
+queue head's sequence. An event has sequence -1, so it misses A's timer. After
+the source task delivers the events, upstream waits for the original full
+latency deadline without rechecking the satisfied packet threshold. Holding
+peer C until program A then hangs with the unexercised 900 s window. Linux
+integration e892b814 reproduced protected RTSP startup failure in 3/5 iterations.
+
+This is an enabled-feature defect. The property comment identifies zero as
+disabling fast-start and describes latency startup as the default. Introducing
+commit bbe0053f8ae20069627725a2fb675b5ea143e238 and upstream 1.14.0 NEWS
+(6854a23b5497543db3c8c8f26cb9762cc7aa0750, lines 341-351) specify early output
+when N consecutive packets are queued. Here N=1 is met; the missed transition
+is caused by internal event scheduling, not an unsatisfied input condition.
+This adds no real-time delivery guarantee while a source event is blocked.
+
+Upstream main 23ca4d4035e4c3fe3948fdea310d3b307a651f73 was inspected before
+this patch, including its file history since the fork base. Its
+`subprojects/gst-plugins-good/gst/rtpmanager/gstrtpjitterbuffer.c` bodies for
+`queue_event`, `gst_rtp_jitter_buffer_fast_start`, `handle_next_buffer` and
+`update_current_timer` are identical to the 541e8b8a base. The four intervening
+file commits do not correct startup. There is no fix to port at that revision.
+
+The only engine change retries the existing private fast-start helper in
+`handle_next_buffer` when first data reaches the head with unknown next_seqnum.
+On success it calls the existing `update_current_timer` and still waits. Both
+calls run under the existing jbuf lock, as in the input chain. The original
+DEADLINE callback still establishes next_seqnum and wakes output. Keep the
+input chain's check, serialized event order, zero/disabled guard, N-packet
+predicate, configured latency, gap/loss/late/RTX/retry behavior, RTCP clock,
+stop/flushing/error paths and the fork's fatal-flow bus reporting. No extra
+timer, state, mutex, public API or test-side input fence is added.
+
+Relying callers: Boundless RTP `feedback_case` (plain/protected), encoded PCMU
+reordering, RTSP protected feedback, and native `runtime/tests/rtp_feedback.c`.
+They retain real packets, independent peers, positive repaired B and ordered
+output where declared. Normal construction retains faststart=0.
+
+Regression: `runtime/tests/rtp_faststart.c` uses the existing before-PLAYING test
+hook to hold source CAPS before submitting A. SEGMENT queues behind CAPS, then
+A's original sink chain completes with GST_FLOW_OK while CAPS remains held.
+Release CAPS, send no C and require exact A through native output/notify within
+one absolute 60 s phase. The same fixture against the unchanged eaa1d67a engine
+is the negative control; retain constructor, window and gates when removing
+only the startup recheck. This supplements `runtime/tests/rtp_feedback.c`, which
+still requires actual NACK/RTX repair, ordered A/B/C, PLI/FIR and its separate
+pressure/stop assertions.
+
+Linux counterfactual against the ordinary eaa1d67a artifact: one execution of
+this fixture reached the CAPS-held/original-chain-GST_FLOW_OK checkpoint, then
+failed its output condition at the absolute phase bound (native exit -6,
+launcher exit 1; 0/1 passed). The engine change below is the only native-code
+delta from that artifact; constructor, window and fixture remain identical.
+
+Both entries are in `runtime/tests/full_native.py`. Build them against the
+matching ordinary gst-full artifact, or use the same compiler/pkg-config inputs
+for those fixtures where the pool builds that artifact. Native library digests
+and revision are checked. Execution results are recorded by the integrating
+revision/platform; this record does not claim an unrun fixed-revision pass.
 
 ## Runtime native readiness (#42)
 

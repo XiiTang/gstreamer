@@ -50,8 +50,11 @@ The ordinary native artifact additionally exports
 and applies the existing jitterbuffer fast-start property before PLAYING. Use
 it explicitly for functional fixtures whose declared playout window is outside
 their subject: the complete phase has one 60 s hang bound inside a 900 s window.
-It removes the otherwise full-window startup delay, not the native missing-packet
-window, RTX mapping or late-drop policy. Normal construction is unchanged.
+The source task rechecks the existing fast-start eligibility after serialized
+setup drains, using the original DEADLINE timer and wakeup. This fixes the missed
+enabled-N-packet transition; it removes the otherwise full-window startup delay.
+The native missing-packet window, RTX mapping, late-drop policy and normal
+construction remain unchanged.
 
 `tests/rtp_feedback.c` observes A before offering C, routes actual native NACK and
 RTX, and positively requires repaired B and ordered output. Progress waits use
@@ -59,6 +62,15 @@ the construction-time notify callback and a retained condition predicate.
 [The patch record](../PATCHES.md#functional-rtp-repair-fixture-startup-403-348)
 compares upstream startup/latency behavior and records the failure path. This
 fixture does not prove default startup delay, a 200/300 ms expiry or retry counts.
+
+`tests/rtp_faststart.c` forces the startup interleaving: source CAPS stays held
+while A's original sink chain completes successfully with SEGMENT queued. After
+releasing CAPS, it requires exact A before any C, with one absolute phase bound
+and native notify/condition predicates. Against the engine without the source
+recheck, the same constructor/window/gates reproduce the missing first output.
+The patch record compares current upstream main, preserves its timer/stop/error
+owners and records why this is an enabled-feature defect rather than the normal
+latency fallback. No production hook or serialized-query barrier is added.
 
 ## DTLS-SRTP
 
