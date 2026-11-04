@@ -137,12 +137,14 @@ static void callback_released (gpointer data)
  * streaming calls, including when NULL fails. Never join under stop_mutex. */
 static void watch_bus (GstRuntimeRtpSession *s)
 { gst_bus_set_sync_handler (s->bus, retain_error, s, stop_handler_released); }
-GstRuntimeRtpSession *
-gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings,
-                             const GstRuntimeDiagnosticSink *sink, GstRuntimeNotify wake)
+static GstRuntimeRtpSession *
+new_session (const GstRuntimeRtpSettings *settings,
+             const GstRuntimeDiagnosticSink *sink, GstRuntimeNotify wake, gboolean faststart)
 {
   if (!wake.notify || !sink || !sink->offer || !settings || settings->payload_type > 127 || !settings->clock_rate
       || settings->clock_rate > G_MAXINT || settings->bandwidth_bps < 0)
+    { gst_runtime_notify_clear (&wake); return NULL; }
+  if (faststart && !settings->reorder)
     { gst_runtime_notify_clear (&wake); return NULL; }
   if (settings->feedback > 7 || (settings->feedback && !settings->reports))
     { gst_runtime_notify_clear (&wake); return NULL; }
@@ -266,7 +268,8 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings,
         goto failed;
       gst_bin_add (GST_BIN (s->pipeline), s->jitter);
       g_object_set (s->jitter, "latency", settings->latency_ms, "do-lost", TRUE,
-                    "do-retransmission", s->settings.rtx != NULL, NULL);
+                    "do-retransmission", s->settings.rtx != NULL,
+                    "faststart-min-packets", faststart ? 1u : 0u, NULL);
       g_signal_connect (s->jitter, "request-pt-map", G_CALLBACK (pt_map), s);
       if (settings->rtx)
         {
@@ -354,6 +357,20 @@ failed:
   gst_runtime_rtp_session_free (s);
   return NULL;
 }
+GstRuntimeRtpSession *
+gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings,
+                             const GstRuntimeDiagnosticSink *sink, GstRuntimeNotify wake)
+{
+  return new_session (settings, sink, wake, FALSE);
+}
+GstRuntimeRtpSession *
+gst_runtime_rtp_session_new_with_test_faststart (const GstRuntimeRtpSettings *settings,
+                                                 const GstRuntimeDiagnosticSink *sink,
+                                                 GstRuntimeNotify wake)
+{
+  return new_session (settings, sink, wake, TRUE);
+}
+
 int
 gst_runtime_rtp_session_try_write (GstRuntimeRtpSession *s, int port, const guint8 *data,
                                    gsize length)

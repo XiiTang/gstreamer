@@ -42,6 +42,24 @@ This fork keeps GStreamer's media engines and native state behind Boundless's
 execution-owned network and resource boundary. The Runtime adapter and packaging
 are separate acceptance gates; the tests here are native-library evidence.
 
+## Functional RTP repair and reordering fixtures
+
+The ordinary native artifact additionally exports
+`gst_runtime_rtp_session_new_with_test_faststart`; Rust exposes
+`Session::new_with_test_faststart` only with `test-support`. It requires reordering
+and applies the existing jitterbuffer fast-start property before PLAYING. Use
+it explicitly for functional fixtures whose declared playout window is outside
+their subject: the complete phase has one 60 s hang bound inside a 900 s window.
+It removes the otherwise full-window startup delay, not the native missing-packet
+window, RTX mapping or late-drop policy. Normal construction is unchanged.
+
+`tests/rtp_feedback.c` observes A before offering C, routes actual native NACK and
+RTX, and positively requires repaired B and ordered output. Progress waits use
+the construction-time notify callback and a retained condition predicate.
+[The patch record](../PATCHES.md#functional-rtp-repair-fixture-startup-403-348)
+compares upstream startup/latency behavior and records the failure path. This
+fixture does not prove default startup delay, a 200/300 ms expiry or retry counts.
+
 ## DTLS-SRTP
 
 - `gst_dtls_connection_set_srtp_profiles` selects only the declared profiles,

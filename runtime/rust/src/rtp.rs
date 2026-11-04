@@ -233,6 +233,12 @@ unsafe extern "C" {
         sink: *const RawSink,
         wake: crate::notify::Notify,
     ) -> *mut c_void;
+    #[cfg(feature = "test-support")]
+    fn gst_runtime_rtp_session_new_with_test_faststart(
+        settings: *const Settings,
+        sink: *const RawSink,
+        wake: crate::notify::Notify,
+    ) -> *mut c_void;
     fn gst_runtime_rtp_session_try_write(
         session: *mut c_void,
         port: i32,
@@ -383,11 +389,42 @@ impl Session {
         sink: Arc<dyn DiagnosticSink>,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, Error> {
+        Self::construct(c, sink, notify, gst_runtime_rtp_session_new)
+    }
+    /// Functional reordering/repair fixtures only. Requires reordering and sets
+    /// native faststart-min-packets=1 before PLAYING; the configured missing-packet
+    /// window and normal error, notification and stop ownership remain unchanged.
+    #[cfg(feature = "test-support")]
+    pub fn new_with_test_faststart(
+        c: Configuration<'_>,
+        sink: Arc<dyn DiagnosticSink>,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self, Error> {
+        if c.reorder_latency.is_none() {
+            return Err(Error(-5));
+        }
+        Self::construct(
+            c,
+            sink,
+            notify,
+            gst_runtime_rtp_session_new_with_test_faststart,
+        )
+    }
+    fn construct(
+        c: Configuration<'_>,
+        sink: Arc<dyn DiagnosticSink>,
+        notify: impl Fn() + Send + Sync + 'static,
+        constructor: unsafe extern "C" fn(
+            *const Settings,
+            *const RawSink,
+            crate::notify::Notify,
+        ) -> *mut c_void,
+    ) -> Result<Self, Error> {
         crate::initialize();
         let sink = Box::new(sink);
         let raw_sink = raw_sink(&sink);
         let raw = with_settings(&c, |settings| unsafe {
-            gst_runtime_rtp_session_new(settings, &raw_sink, crate::notify::Notify::new(notify))
+            constructor(settings, &raw_sink, crate::notify::Notify::new(notify))
         })?;
         let raw = NonNull::new(raw).ok_or(Error(-5))?;
         Ok(Self {

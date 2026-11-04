@@ -33,6 +33,12 @@ typedef struct {
 GST_API GstRuntimeRtpSession *gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings,
                                                           const GstRuntimeDiagnosticSink *sink,
                                                           GstRuntimeNotify wake);
+/* Functional reordering/repair fixtures only: requires reorder, sets the existing
+ * jitterbuffer faststart-min-packets=1 before PLAYING. Latency and loss/RTX policy
+ * remain configured. Same ownership, validation and NULL failure as new. */
+GST_API GstRuntimeRtpSession *gst_runtime_rtp_session_new_with_test_faststart (
+    const GstRuntimeRtpSettings *settings, const GstRuntimeDiagnosticSink *sink,
+    GstRuntimeNotify wake);
 /* Input ports: 0 outbound RTP, 1 inbound RTP, 2 inbound RTCP. */
 GST_API
 int gst_runtime_rtp_session_write (GstRuntimeRtpSession *session, int port, const guint8 *data,

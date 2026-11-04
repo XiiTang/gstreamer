@@ -1,3 +1,40 @@
+## Functional RTP repair fixture startup (#403, #348)
+
+The runtime adds `gst_runtime_rtp_session_new_with_test_faststart` in the ordinary
+native artifact and `Session::new_with_test_faststart` behind Rust's
+`test-support` feature. It requires reordering and sets the existing
+`faststart-min-packets=1` before PLAYING. The normal constructor retains 0;
+settings ABI, configured latency, native loss/RTX rules, diagnostic/notify
+ownership (including failed construction), and stop/fence behavior are unchanged.
+
+Reason and regression evidence: the real NACK/RTX fixture previously declared
+200 ms playout, omitted primary 2, and routed native feedback/repair on host
+scheduling. A loaded host can route repair after native has emitted 3; upstream
+then drops late 2 (`gstrtpjitterbuffer.c` chain's too-late branch). Boundless #403
+has the matching real-driver trace and a held-repair reproduction. This is an
+unexercised product window, not an assertion about deadline expiry. The fixture
+now uses a 900 s window with one 60 s whole-phase hang budget, observes output A
+before sending C, waits through retained/coalescing native notify predicates,
+and still requires exact RTX mapping, repaired B, ordered A/B/C and PLI/FIR.
+The independent real-socket Boundless RTP/RTSP fixtures use the same policy.
+
+Upstream comparison (GStreamer 1.28.7): default jitter startup schedules DEADLINE
+at PTS plus latency; increasing latency alone therefore holds initial output.
+`gst_rtp_jitter_buffer_fast_start` reschedules only that initial DEADLINE after
+`faststart-min-packets` consecutive packets. Once started, `handle_next_buffer`
+pushes contiguous packets immediately and waits at gaps. The existing
+`get_rtx_delay` requests missing packets from spacing/jitter (capped by latency
+minus RTT); retry period and default request deadline still depend on latency.
+This constructor changes no upstream algorithm, clock or timer; it separates
+fixture startup from the unexercised window. Exact expiry/retry-count tests
+remain upstream's GstHarness/GstTestClock tests. No GstCheck build flavor or
+staging/provenance change is needed.
+
+Regression entry: `runtime/tests/rtp_feedback.c`, built against this commit's
+ordinary gst-full artifact (`runtime/tests/full_native.py` or the same compiler
+and pkg-config inputs for that one fixture). Execution results are recorded by
+the integrating revision/platform; this record does not claim an unrun pass.
+
 # Boundless patches
 
 ## Runtime native readiness (#42)

@@ -6,6 +6,29 @@
 #include <gst/rtp/gstrtpbuffer.h>
 #include <string.h>
 
+/* Whole functional phase: the 60 s hang budget lies inside the unexercised
+ * 900 s playout window. A notification retains progress even before waiting. */
+#define STALL_US (60 * G_USEC_PER_SEC)
+#define TEST_STALL_MS (900 * 1000)
+typedef struct { GMutex lock; GCond changed; gboolean ready; } Progress;
+static void
+progress_notify (gpointer data)
+{
+  Progress *p = data;
+  g_mutex_lock (&p->lock);
+  p->ready = TRUE;
+  g_cond_signal (&p->changed);
+  g_mutex_unlock (&p->lock);
+}
+static void
+progress_wait (Progress *p, gint64 deadline)
+{
+  g_mutex_lock (&p->lock);
+  while (!p->ready)
+    g_assert_true (g_cond_wait_until (&p->changed, &p->lock, deadline));
+  p->ready = FALSE;
+  g_mutex_unlock (&p->lock);
+}
 static guint
 rtcp_kinds (const guint8 *bytes, gsize length)
 {
@@ -66,18 +89,21 @@ main (int argc, char **argv)
                                .feedback = 7,
                                .rtx = &at,
                                .reorder = TRUE,
-                               .latency_ms = 200,
+                               .latency_ms = TEST_STALL_MS,
                                .bandwidth_bps = 128000 };
   GstRuntimeRtpSettings bc = ac;
   bc.ssrc = 8;
   bc.rtx = &bt;
   TestSink as = {0}, bs = {0};
   GstRuntimeDiagnosticSink a_sink = test_sink (&as), b_sink = test_sink (&bs);
-  GstRuntimeRtpSession *a = gst_runtime_rtp_session_new (&ac, &a_sink, test_notify ()),
-                       *b = gst_runtime_rtp_session_new (&bc, &b_sink, test_notify ());
+  Progress progress = {0};
+  GstRuntimeRtpSession *a = gst_runtime_rtp_session_new_with_test_faststart (
+      &ac, &a_sink, (GstRuntimeNotify) { progress_notify, &progress, NULL }),
+                       *b = gst_runtime_rtp_session_new_with_test_faststart (
+      &bc, &b_sink, (GstRuntimeNotify) { progress_notify, &progress, NULL });
   g_assert_nonnull (a);
   g_assert_nonnull (b);
-  for (guint seq = 1; seq <= 3; seq++)
+  for (guint seq = 1; seq <= 2; seq++)
     {
       guint8 packet[]
           = { 128, 96, 0, seq, 0, 0, (seq * 3000) >> 8, (seq * 3000) & 255, 0, 0, 0, 7, seq };
@@ -85,7 +111,7 @@ main (int argc, char **argv)
     }
   guint original = 0, repaired = 0, delivered = 0, feedback = 0;
   gboolean pli = FALSE, fir = FALSE;
-  gint64 deadline = g_get_monotonic_time () + 3 * G_USEC_PER_SEC;
+  gint64 deadline = g_get_monotonic_time () + STALL_US;
   while (g_get_monotonic_time () < deadline && !(delivered == 3 && feedback == 7))
     {
       guint8 bytes[65536];
@@ -130,6 +156,12 @@ main (int argc, char **argv)
           g_assert_cmpuint (bytes[3], ==, delivered);
           g_assert_cmpuint (bytes[11], ==, 7);
           g_assert_cmpuint (bytes[12], ==, delivered);
+          if (delivered == 1)
+            {
+              /* A reached the consumer before C opens the missing-B gap. */
+              const guint8 third[] = { 128, 96, 0, 3, 0, 0, 35, 40, 0, 0, 0, 7, 3 };
+              g_assert_cmpint (gst_runtime_rtp_session_write (a, 0, third, sizeof (third)), ==, 0);
+            }
         }
       if (!pli && repaired)
         {
@@ -141,7 +173,8 @@ main (int argc, char **argv)
           g_assert_cmpint (gst_runtime_rtp_session_feedback (b, 4, 7, 0, 0), ==, 1);
           fir = TRUE;
         }
-      g_usleep (1000);
+      if (!(delivered == 3 && feedback == 7))
+        progress_wait (&progress, deadline);
     }
   g_assert_cmpuint (original, ==, 3);
   g_assert_cmpuint (repaired, >=, 1);
@@ -160,6 +193,8 @@ main (int argc, char **argv)
   test_sink_assert_none (&as);
   gst_runtime_rtp_session_free (b);
   test_sink_assert_none (&bs);
+  g_cond_clear (&progress.changed);
+  g_mutex_clear (&progress.lock);
   ac.rtx = NULL;
   ac.feedback = 0;
   a = gst_runtime_rtp_session_new (&ac, &a_sink, test_notify ());
