@@ -6,7 +6,8 @@ typedef struct {
   GMutex lock; GCond changed;
   guint generation, destroyed;
   gboolean hold, entered, release;
-  GThread *owner;
+  GThread *owner, *stop_thread;
+  gboolean stop_woke;
 } Wake;
 static void notify (gpointer data)
 {
@@ -14,6 +15,7 @@ static void notify (gpointer data)
   g_mutex_lock (&w->lock);
   g_assert_cmpuint (w->destroyed, ==, 0);
   w->generation++;
+  if (g_thread_self () == w->stop_thread) { w->stop_woke = TRUE; g_cond_broadcast (&w->changed); }
   if (w->hold && g_thread_self () != w->owner) {
     w->entered = TRUE; g_cond_broadcast (&w->changed);
     while (!w->release) g_cond_wait (&w->changed, &w->lock);
@@ -141,7 +143,12 @@ static void active_error (gboolean stop_first)
   g_assert_cmpuint (facts.count, ==, 1); g_assert_cmpint (facts.first_code, ==, GST_STREAM_ERROR_DECODE);
   gst_runtime_rtp_session_free (s); g_assert_cmpuint (w.destroyed, ==, 1); g_free (facts.first_domain);
 }
-static gpointer stop (gpointer s) { gst_runtime_rtp_session_stop (s); return NULL; }
+typedef struct { GstRuntimeRtpSession *session; Wake *wake; } Stopping;
+static gpointer stop (gpointer data) {
+  Stopping *s = data;
+  g_mutex_lock (&s->wake->lock); s->wake->stop_thread = g_thread_self (); g_mutex_unlock (&s->wake->lock);
+  gst_runtime_rtp_session_stop (s->session); return NULL;
+}
 static void pending_wake_stop (void)
 {
   Wake w = {0}; TestSink facts = {0}; GstRuntimeDiagnosticSink sink = test_sink (&facts);
@@ -149,8 +156,11 @@ static void pending_wake_stop (void)
   g_mutex_lock (&w.lock); w.hold = TRUE; g_mutex_unlock (&w.lock);
   g_assert_cmpint (gst_runtime_rtp_session_try_write (s, 0, packet, sizeof (packet)), ==, 0);
   g_mutex_lock (&w.lock); while (!w.entered) g_cond_wait (&w.changed, &w.lock); g_mutex_unlock (&w.lock);
-  GThread *thread = g_thread_new ("stop", stop, s);
-  g_mutex_lock (&w.lock); g_assert_cmpuint (w.destroyed, ==, 0);
+  Stopping stopping = {s, &w};
+  GThread *thread = g_thread_new ("stop", stop, &stopping);
+  g_mutex_lock (&w.lock);
+  while (!w.stop_woke) g_cond_wait (&w.changed, &w.lock);
+  g_assert_cmpuint (w.destroyed, ==, 0);
   w.release = TRUE; g_cond_broadcast (&w.changed); g_mutex_unlock (&w.lock);
   g_thread_join (thread);
   GstRuntimeRtpStopOutcome outcome; g_assert_cmpint (gst_runtime_rtp_session_close (s, &outcome), ==, 0);

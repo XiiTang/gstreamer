@@ -260,10 +260,18 @@ static void queued_error_one_consumer (gboolean stop_first)
 }
 static void pull_takes_a_queued_error (void) { queued_error_one_consumer (FALSE); }
 static void stop_takes_a_queued_error (void) { queued_error_one_consumer (TRUE); }
+static void count_wake (gpointer data) {}
+static void count_destroy (gpointer data) { (*(guint *)data)++; }
 static void failed_construction_offers_its_bus_error (void)
 {
   TestSink facts = {0}; GstRuntimeDiagnosticSink sink = test_sink (&facts);
-  g_assert_null (test_rtp_failing_new (&sink));
+  guint destroyed = 0;
+  GstRuntimeRtpSettings settings = { .ssrc = 7, .payload_type = 8, .clock_rate = 8000 };
+  test_before_playing = fail_before_playing;
+  g_assert_null (gst_runtime_rtp_session_new (&settings, &sink,
+      (GstRuntimeNotify) { count_wake, &destroyed, count_destroy }));
+  test_before_playing = NULL;
+  g_assert_cmpuint (destroyed, ==, 1);
   g_assert_cmpuint (facts.count, ==, 1);
   g_assert_cmpstr (facts.first_domain, ==, "gst-stream-error-quark");
   g_assert_cmpint (facts.first_code, ==, GST_STREAM_ERROR_FORMAT);
