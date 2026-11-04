@@ -29,16 +29,30 @@ Upstream GstBus calls its sync handler before enqueueing PASS messages. A wake
 there alone can precede an observable error. The runtime therefore retains
 ERROR messages in its existing stop-mutex domain before waking and returns
 DROP, owning each message until the active reader or stop offers and releases
-it once. The same lifetime handler counts/offers errors during NULL. Upstream
-NULL normally flushes the bus; the runtime continues disabling that flush to
-retain cleanup failures. Stop detaches the handler and all six app callbacks,
+it once. All unused non-ERROR messages are released with DROP at this same
+handler, including SDES ELEMENT messages and shutdown state messages. There is
+no asynchronous bus consumer. Passing them on would grow the queue while
+connected and retain source objects through a message/pipeline/bus cycle after
+free (review B1). The former upstream `gst_bus_pop_filtered(ERROR)` consumer
+discarded unmatched messages; the lifetime handler preserves that duty without
+polling. The same handler counts/offers errors during NULL. Upstream NULL
+normally flushes the bus specifically to release messages and their source
+references (`gstpipeline.c` READY_TO_NULL and `gst_bus_set_flushing`); the
+runtime continues disabling that flush to retain cleanup failures, so it must
+consume every message through the end of NULL. Stop detaches the handler and all six app callbacks,
 waits for their destroy notifications (including failed construction/NULL),
 then destroys registration data before native objects. Replacement alone would
 not fence in-flight callbacks. No upstream source, timeout, recovery or retry
 policy is changed; the C fixture-only blocking writer keeps its existing wait.
 
 Regression: `tests/rtp_wake.c` drives real sample/EOS, packet/encoded-byte
-capacity, active bus failure and pending-wake stop; `tests/dtls_timeout.c`
+capacity, active bus failure and pending-wake stop. `tests/rtp_bus.c` admits 64
+valid compound RTCP RR/changed-SDES packets through the real input, waits for
+each native SDES signal, checks the bus without draining it, and requires both
+an empty bus through close and pipeline weak finalization after free. On
+be349d8b it observes retained messages and an unfinalized pipeline. Existing
+`tests/rtp_stop.c` once-only error/stop/fence assertions remain required.
+`tests/dtls_timeout.c`
 retains timer-failure/fence coverage and tests query/short-buffer and registration
 destruction. `rust::dtls::tests::empty_output_allocates_nothing_and_a_stored_wake_delivers_the_exact_flight`
 counts the output allocation checkpoint and checks a real flight. The full

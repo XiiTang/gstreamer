@@ -10,7 +10,12 @@ Read predicates before waiting, using a retained/coalescing permit supplied by
 the caller. Native DTLS/RTCP clocks continue scheduling their own output.
 Appsrc need-data (min-percent=100) announces capacity changes; appsink sample/EOS
 announces output. Bus errors are retained before notifying and offered once to
-the existing diagnostic owner. DTLS output accepts a non-consuming NULL-buffer
+the existing diagnostic owner. The lifetime bus handler releases every unused
+non-error message instead of queueing it without a consumer, including RTCP
+SDES updates and NULL-state messages. This keeps retention bounded while
+connected and breaks message/source/pipeline/bus cycles on free. Unlike
+upstream's normal NULL bus flush, our handler must consume shutdown messages
+while retaining cleanup errors. DTLS output accepts a non-consuming NULL-buffer
 length query; Rust allocates only for a known packet, at its exact size.
 
 Stop joins native callbacks, detaches the bus/app callback tables and waits for
@@ -22,7 +27,9 @@ records the reason and comparison with upstream GStreamer wait/error/close
 behavior. No upstream engine or native timer changes are required.
 
 Regression paths: `tests/rtp_wake.c` (six real sample/EOS, capacity, active-error
-and pending-wake stop cases), `tests/dtls_timeout.c` (timer/fence, length-query
+and pending-wake stop cases), `tests/rtp_bus.c` (64 real changing RTCP SDES
+updates, no queued bus messages through close, pipeline weak finalization after
+free; both retention and finalization fail on be349d8b), `tests/dtls_timeout.c` (timer/fence, length-query
 and short-buffer), and Rust's
 `empty_output_allocates_nothing_and_a_stored_wake_delivers_the_exact_flight`.
 Run `tests/full_native.py`, `tests/build_rtp_stop.py` and the DTLS native suite
@@ -274,7 +281,8 @@ whichever handle initiates stop publishes the result for that owner. Drop
 still cancels. Close waits for an in-progress stop before taking its result.
 The native pipeline disables NULL's bus auto-flush; its lifetime synchronous
 bus handler retains errors before readiness and during the state transition, and queued
-errors are drained before publishing. A concurrent read cannot consume bus
+errors are drained before publishing. Non-error messages are released in that
+handler through NULL rather than left in an unconsumed bus queue. A concurrent read cannot consume bus
 errors after stop has claimed them. Each consumed bus error is offered once before release, under the stop lock,
 through the required borrowed `GstRuntimeDiagnosticSink`. The constructor copies
 its sink before any failing allocation path, so construction cleanup offers its

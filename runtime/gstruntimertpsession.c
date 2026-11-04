@@ -655,7 +655,12 @@ retain_error (GstBus *bus, GstMessage *message, gpointer data)
 {
   GstRuntimeRtpSession *s = data;
   if (GST_MESSAGE_TYPE (message) != GST_MESSAGE_ERROR)
-    return GST_BUS_PASS;
+    {
+      /* There is no asynchronous bus consumer. In particular, SDES and NULL
+       * state messages must not retain their sources in the bus queue. */
+      gst_message_unref (message);
+      return GST_BUS_DROP;
+    }
 #ifdef GST_RUNTIME_RTP_TEST_HOOKS
   if (test_handler_entered)
     test_handler_entered (message);
