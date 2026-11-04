@@ -1,3 +1,4 @@
+#include "test_notify.h"
 #include "test_sink.h"
 #include "gstruntimepayload.h"
 #include "gstruntimertpsession.h"
@@ -61,12 +62,12 @@ session_roundtrip (GstRuntimePayloadFormat format, const guint8 *data, gsize len
   g_free (body);
   TestSink send_facts = {0};
   GstRuntimeDiagnosticSink send_sink = test_sink (&send_facts);
-  GstRuntimeRtpSession *send = gst_runtime_rtp_session_new (&settings, &send_sink);
+  GstRuntimeRtpSession *send = gst_runtime_rtp_session_new (&settings, &send_sink, test_notify ());
   g_assert_nonnull (send);
   codec.ssrc = settings.ssrc = 654321;
   TestSink receive_facts = {0};
   GstRuntimeDiagnosticSink receive_sink = test_sink (&receive_facts);
-  GstRuntimeRtpSession *receive = gst_runtime_rtp_session_new (&settings, &receive_sink);
+  GstRuntimeRtpSession *receive = gst_runtime_rtp_session_new (&settings, &receive_sink, test_notify ());
   g_assert_nonnull (receive);
   gst_runtime_sdp_selection_free (selection);
   g_assert_cmpint (
@@ -134,7 +135,7 @@ incomplete_access_unit_bound (void)
           = { .ssrc = 7, .payload_type = 96, .clock_rate = 90000, .payload = &codec };
       TestSink session_facts = {0};
       GstRuntimeDiagnosticSink session_sink = test_sink (&session_facts);
-      GstRuntimeRtpSession *session = gst_runtime_rtp_session_new (&settings, &session_sink);
+      GstRuntimeRtpSession *session = gst_runtime_rtp_session_new (&settings, &session_sink, test_notify ());
       g_assert_nonnull (session);
       guint8 *packet = g_malloc0 (60000);
       packet[0] = 0x80;
@@ -179,7 +180,7 @@ jitter_byte_pressure_stop (void)
       = { .ssrc = 7, .payload_type = 96, .clock_rate = 90000, .reorder = TRUE, .latency_ms = 1 };
   TestSink session_facts = {0};
   GstRuntimeDiagnosticSink session_sink = test_sink (&session_facts);
-  GstRuntimeRtpSession *session = gst_runtime_rtp_session_new (&settings, &session_sink);
+  GstRuntimeRtpSession *session = gst_runtime_rtp_session_new (&settings, &session_sink, test_notify ());
   g_assert_nonnull (session);
   guint8 *packet = g_malloc0 (16000);
   packet[0] = 0x80;
@@ -220,7 +221,7 @@ raw_and_stop (void)
       = { .ssrc = 0x05060708, .payload_type = 0, .clock_rate = 8000 };
   TestSink raw_facts = {0};
   GstRuntimeDiagnosticSink raw_sink = test_sink (&raw_facts);
-  GstRuntimeRtpSession *raw = gst_runtime_rtp_session_new (&settings, &raw_sink);
+  GstRuntimeRtpSession *raw = gst_runtime_rtp_session_new (&settings, &raw_sink, test_notify ());
   g_assert_nonnull (raw);
   const guint8 packet[] = { 0x80, 0, 0xff, 0xff, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0xff, 0, 1 };
   g_assert_cmpint (gst_runtime_rtp_session_try_write (raw, 0, packet, sizeof (packet)), ==, 0);
@@ -273,7 +274,7 @@ jpeg_rejection (const gchar *directory)
       = { .ssrc = 123, .payload_type = 96, .clock_rate = 90000, .payload = &codec };
   TestSink send_facts = {0};
   GstRuntimeDiagnosticSink send_sink = test_sink (&send_facts);
-  GstRuntimeRtpSession *send = gst_runtime_rtp_session_new (&settings, &send_sink);
+  GstRuntimeRtpSession *send = gst_runtime_rtp_session_new (&settings, &send_sink, test_notify ());
   g_assert_nonnull (send);
   g_assert_cmpint (gst_runtime_rtp_session_try_write_frame (send, (guint8 *)data, length, 0,
                                                           GST_CLOCK_TIME_NONE),

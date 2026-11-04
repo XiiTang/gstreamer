@@ -1,5 +1,36 @@
 # Boundless native media integration
 
+## Runtime native readiness (#42)
+
+The Boundless-written runtime transfers one `GstRuntimeNotify` registration at
+association/session construction, including failed construction. Its callback
+must not block, panic or re-enter the native owner. Callbacks run on native
+DTLS caller/timeout threads and RTP streaming, message-posting and stop threads.
+Read predicates before waiting, using a retained/coalescing permit supplied by
+the caller. Native DTLS/RTCP clocks continue scheduling their own output.
+Appsrc need-data (min-percent=100) announces capacity changes; appsink sample/EOS
+announces output. Bus errors are retained before notifying and offered once to
+the existing diagnostic owner. DTLS output accepts a non-consuming NULL-buffer
+length query; Rust allocates only for a known packet, at its exact size.
+
+Stop joins native callbacks, detaches the bus/app callback tables and waits for
+their destroy notifications before destroying registration data and native
+objects, also on failed construction or NULL. DTLS uses its existing
+stop_and_join fence before disconnecting key/send hooks. A stored Rust permit
+retains no native pointer. [PATCHES.md](../PATCHES.md#runtime-native-readiness-42)
+records the reason and comparison with upstream GStreamer wait/error/close
+behavior. No upstream engine or native timer changes are required.
+
+Regression paths: `tests/rtp_wake.c` (six real sample/EOS, capacity, active-error
+and pending-wake stop cases), `tests/dtls_timeout.c` (timer/fence, length-query
+and short-buffer), and Rust's
+`empty_output_allocates_nothing_and_a_stored_wake_delivers_the_exact_flight`.
+Run `tests/full_native.py`, `tests/build_rtp_stop.py` and the DTLS native suite
+against the matching artifact, plus the safe Rust runtime suite. Boundless
+checks idle native-entry counts under a driven clock, then real output,
+independent DTLS retransmission and RTP/RTSP peer paths. Record actual
+revision/platform/results; this documentation does not claim unrun platforms.
+
 This fork keeps GStreamer's media engines and native state behind Boundless's
 execution-owned network and resource boundary. The Runtime adapter and packaging
 are separate acceptance gates; the tests here are native-library evidence.
@@ -241,8 +272,8 @@ with `Some(Playing)` and `Some(Ready)`.
 reads the first stop's exact `StateChangeReturn` plus its bus-error count. `Cancellation::cancel(&self)` remains void and cloneable;
 whichever handle initiates stop publishes the result for that owner. Drop
 still cancels. Close waits for an in-progress stop before taking its result.
-The native pipeline disables NULL's bus auto-flush; a temporary synchronous
-bus handler captures errors posted during the state transition, and queued
+The native pipeline disables NULL's bus auto-flush; its lifetime synchronous
+bus handler retains errors before readiness and during the state transition, and queued
 errors are drained before publishing. A concurrent read cannot consume bus
 errors after stop has claimed them. Each consumed bus error is offered once before release, under the stop lock,
 through the required borrowed `GstRuntimeDiagnosticSink`. The constructor copies

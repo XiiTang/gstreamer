@@ -43,6 +43,7 @@ fn session(payload: Option<&Configuration<'_>>, ssrc: u32) -> (Session, Arc<comm
             negotiated: None,
         },
         rec.clone(),
+        || {},
     )
     .unwrap();
     (owner, rec)

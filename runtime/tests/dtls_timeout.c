@@ -1,3 +1,4 @@
+#include "test_notify.h"
 /* Exercise the real timeout callback with a failed OpenSSL timer operation.
  * Including the implementation keeps fault injection out of the native ABI. */
 #include <gst/gst.h>
@@ -7,6 +8,7 @@ typedef struct {
   GMutex lock; GCond changed;
   gpointer watched, runtime_mutex, disposer;
   gboolean wrap_next, in_callback, release, disposer_waiting, fence_entered, quiesce;
+  guint wakes, destroyed;
   gint seq, callback_done, fence_returned, torn_down, free_returned;
   const gchar *domain; gint code, slot;
 } Probe;
@@ -158,15 +160,19 @@ static gpointer dispose_runtime (gpointer self)
   g_mutex_lock (&probe.lock); probe.free_returned = g_atomic_int_add (&probe.seq, 1) + 1;
   g_cond_broadcast (&probe.changed); g_mutex_unlock (&probe.lock); return NULL;
 }
+static void runtime_wake (gpointer data)
+{ Probe *p = data; g_assert_cmpuint (p->destroyed, ==, 0); p->wakes++; }
+static void runtime_wake_destroy (gpointer data)
+{ Probe *p = data; g_assert_cmpint (p->callback_done, >, 0); g_assert_cmpuint (++p->destroyed, ==, 1); }
 static void failure_callback_data_outlives_a_running_callback (gboolean quiesce)
 {
   /* Earlier cases used the wrappers too; only this callback is gated. */
-  probe.quiesce = quiesce;
+  probe.quiesce = quiesce; probe.wakes = probe.destroyed = 0;
   probe.in_callback = probe.release = probe.disposer_waiting = FALSE;
   probe.slot = probe.code = 0;
   probe.fence_entered = FALSE; probe.fence_returned = probe.torn_down = probe.free_returned = 0;
   probe.wrap_next = TRUE; GstRuntimeDtls *self = NULL;
-  g_assert_cmpint (gst_runtime_dtls_create (NULL, "SRTP_AES128_CM_SHA1_80", accept, NULL, &self), ==, 0);
+  g_assert_cmpint (gst_runtime_dtls_create (NULL, "SRTP_AES128_CM_SHA1_80", accept, NULL, (GstRuntimeNotify) { runtime_wake, &probe, runtime_wake_destroy }, &self), ==, 0);
   self->connection->priv->connection_state = GST_DTLS_CONNECTION_STATE_CONNECTING;
   const gchar *domain; gint code; gsize length;
   /* The owner's last read before the stop finds nothing. */
@@ -186,6 +192,7 @@ static void failure_callback_data_outlives_a_running_callback (gboolean quiesce)
   g_assert_cmpint (probe.fence_returned, ==, 0); g_assert_cmpint (probe.torn_down, ==, 0); g_assert_cmpint (probe.free_returned, ==, 0);
   probe.release = TRUE; g_cond_broadcast (&probe.changed); g_mutex_unlock (&probe.lock);
   g_thread_join (f);
+  g_assert_cmpuint (probe.wakes, ==, 1); g_assert_cmpuint (probe.destroyed, ==, 1);
   g_assert_cmpint (probe.slot, ==, 1); g_assert_cmpstr (probe.domain, ==, "gst-resource-error-quark");
   g_assert_cmpint (probe.code, ==, 1);
   g_assert_cmpint (probe.callback_done, <, probe.fence_returned);
@@ -213,8 +220,17 @@ static void quiesce_keeps_the_cap_fact_and_adds_none (void)
   for (guint overflow = 0; overflow != 2; overflow++)
     {
       GstRuntimeDtls *self = NULL;
-      g_assert_cmpint (gst_runtime_dtls_create (NULL, "SRTP_AES128_CM_SHA1_80", accept, NULL, &self), ==, 0);
+      g_assert_cmpint (gst_runtime_dtls_create (NULL, "SRTP_AES128_CM_SHA1_80", accept, NULL, test_notify (), &self), ==, 0);
+      gsize queried = 0;
+      g_assert_cmpint (gst_runtime_dtls_output (self, NULL, &queried), ==, 0);
       g_assert_cmpint (gst_runtime_dtls_start (self, 1), ==, 0);
+      g_assert_cmpint (gst_runtime_dtls_output (self, NULL, &queried), ==, 1);
+      g_assert_cmpuint (queried, >, 0);
+      guint8 short_buffer; gsize short_length = 1;
+      g_assert_cmpint (gst_runtime_dtls_output (self, &short_buffer, &short_length), ==, -2);
+      gsize again = 0;
+      g_assert_cmpint (gst_runtime_dtls_output (self, NULL, &again), ==, 1);
+      g_assert_cmpuint (again, ==, queried);
       guint8 bytes[65535]; gsize length = sizeof (bytes);
       g_assert_cmpint (gst_runtime_dtls_output (self, bytes, &length), ==, 1);
       if (overflow)

@@ -45,6 +45,7 @@ unsafe extern "C" {
         profiles: *const c_char,
         verify: Verify,
         data: *mut c_void,
+        wake: crate::notify::Notify,
         out: *mut *mut c_void,
     ) -> i32;
     fn gst_runtime_dtls_start(raw: *mut c_void, client: i32) -> i32;
@@ -120,6 +121,8 @@ pub struct Keys {
     pub receive: Zeroizing<Vec<u8>>,
 }
 pub struct Association {
+    #[cfg(test)]
+    output_allocations: usize,
     raw: NonNull<c_void>,
     // Boxed twice so the native opaque userdata points at a stable sized value.
     _verifier: Box<Verifier>,
@@ -171,6 +174,7 @@ impl Association {
         pem: Option<&str>,
         profiles: &[Profile],
         verify: impl Fn(&[&[u8]]) -> bool + Send + Sync + 'static,
+        notify: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, Error> {
         crate::initialize();
         if profiles.is_empty()
@@ -214,10 +218,13 @@ impl Association {
                 names.as_ptr(),
                 verify_chain,
                 (&mut *verifier as *mut Verifier).cast(),
+                crate::notify::Notify::new(notify),
                 &mut raw,
             )
         })?;
         Ok(Self {
+            #[cfg(test)]
+            output_allocations: 0,
             raw: NonNull::new(raw).ok_or(Error::INVALID)?,
             _verifier: verifier,
             _exclusive: PhantomData,
@@ -247,11 +254,21 @@ impl Association {
         }
     }
     pub fn output(&mut self) -> Result<Option<Vec<u8>>, Error> {
-        let mut bytes = vec![0; 65535];
-        let mut length = bytes.len();
+        let mut length = 0;
+        match unsafe {
+            gst_runtime_dtls_output(self.raw.as_ptr(), std::ptr::null_mut(), &mut length)
+        } {
+            0 => return Ok(None),
+            1 => {}
+            n => return Err(Error(n)),
+        }
+        #[cfg(test)]
+        {
+            self.output_allocations += 1;
+        }
+        let mut bytes = vec![0; length];
         match unsafe { gst_runtime_dtls_output(self.raw.as_ptr(), bytes.as_mut_ptr(), &mut length) }
         {
-            0 => Ok(None),
             1 => {
                 bytes.truncate(length);
                 Ok(Some(bytes))
@@ -318,6 +335,40 @@ mod tests {
         Err(Error::TIMEOUT)
     }
     #[test]
+    fn empty_output_allocates_nothing_and_a_stored_wake_delivers_the_exact_flight() {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let count = wakes.clone();
+        let mut owner = Association::new(
+            None,
+            &[Profile::AeadAes128Gcm],
+            |_| true,
+            move || {
+                count.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .unwrap();
+        for _ in 0..32 {
+            assert!(owner.output().unwrap().is_none());
+        }
+        assert_eq!(owner.output_allocations, 0);
+        owner.start(true).unwrap();
+        assert!(wakes.load(Ordering::SeqCst) > 0);
+        let mut length = 0;
+        assert_eq!(
+            unsafe {
+                gst_runtime_dtls_output(owner.raw.as_ptr(), std::ptr::null_mut(), &mut length)
+            },
+            1
+        );
+        let packet = owner.output().unwrap().unwrap();
+        assert_eq!(packet.len(), length);
+        assert_eq!(owner.output_allocations, 1);
+        assert!(owner.output().unwrap().is_none());
+        assert_eq!(owner.output_allocations, 1);
+        drop(owner);
+        assert_eq!(Arc::strong_count(&wakes), 1);
+    }
+    #[test]
     fn association_verifies_before_one_shot_keys_and_matches_both_directions() {
         for profile in [
             Profile::AesCm128HmacSha1_80,
@@ -326,14 +377,19 @@ mod tests {
         ] {
             let verified = Arc::new(AtomicUsize::new(0));
             let counter = verified.clone();
-            let mut client = Association::new(None, &[profile], move |chain| {
-                assert_eq!(chain.len(), 1);
-                assert!(!chain[0].is_empty());
-                counter.fetch_add(1, Ordering::SeqCst);
-                true
-            })
+            let mut client = Association::new(
+                None,
+                &[profile],
+                move |chain| {
+                    assert_eq!(chain.len(), 1);
+                    assert!(!chain[0].is_empty());
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    true
+                },
+                || {},
+            )
             .unwrap();
-            let mut server = Association::new(None, &[profile], |_| true).unwrap();
+            let mut server = Association::new(None, &[profile], |_| true, || {}).unwrap();
             assert!(client.take_keys().unwrap().is_none());
             assert_ne!(
                 client.fingerprint_sha256().unwrap(),
@@ -353,12 +409,18 @@ mod tests {
     #[test]
     fn rejected_or_panicking_verifier_never_releases_keys() {
         for panic in [false, true] {
-            let mut client = Association::new(None, &[Profile::AeadAes128Gcm], move |_| {
-                assert!(!panic, "synthetic verifier failure");
-                false
-            })
+            let mut client = Association::new(
+                None,
+                &[Profile::AeadAes128Gcm],
+                move |_| {
+                    assert!(!panic, "synthetic verifier failure");
+                    false
+                },
+                || {},
+            )
             .unwrap();
-            let mut server = Association::new(None, &[Profile::AeadAes128Gcm], |_| true).unwrap();
+            let mut server =
+                Association::new(None, &[Profile::AeadAes128Gcm], |_| true, || {}).unwrap();
             assert!(exchange(&mut client, &mut server).is_err());
             assert!(client.take_keys().is_err());
         }
@@ -366,36 +428,48 @@ mod tests {
     #[test]
     fn quiesce_keeps_the_final_failure_readable_until_free() {
         let profile = Profile::AeadAes128Gcm;
-        let mut client = Association::new(None, &[profile], |_| false).unwrap();
-        let mut server = Association::new(None, &[profile], |_| true).unwrap();
+        let mut client = Association::new(None, &[profile], |_| false, || {}).unwrap();
+        let mut server = Association::new(None, &[profile], |_| true, || {}).unwrap();
         assert!(exchange(&mut client, &mut server).is_err());
-        let failed = client.failure(&mut []).map(|(fact, _)| (fact.domain, fact.code));
+        let failed = client
+            .failure(&mut [])
+            .map(|(fact, _)| (fact.domain, fact.code));
         assert!(failed.is_some());
         let mut client = client.quiesce();
         assert_eq!(
-            client.failure(&mut []).map(|(fact, _)| (fact.domain, fact.code)),
+            client
+                .failure(&mut [])
+                .map(|(fact, _)| (fact.domain, fact.code)),
             failed
         );
-        let mut healthy = Association::new(None, &[profile], |_| true).unwrap();
-        let mut peer = Association::new(None, &[profile], |_| true).unwrap();
+        let mut healthy = Association::new(None, &[profile], |_| true, || {}).unwrap();
+        let mut peer = Association::new(None, &[profile], |_| true, || {}).unwrap();
         exchange(&mut healthy, &mut peer).unwrap();
         assert!(healthy.quiesce().failure(&mut []).is_none());
     }
     #[test]
     fn supplied_invalid_identity_is_rejected_and_pending_timer_owner_is_released() {
         assert!(
-            Association::new(Some("invalid identity"), &[Profile::AeadAes128Gcm], |_| {
-                true
-            })
+            Association::new(
+                Some("invalid identity"),
+                &[Profile::AeadAes128Gcm],
+                |_| { true },
+                || {}
+            )
             .is_err()
         );
         for _ in 0..32 {
             let marker = Arc::new(());
             let callback_marker = marker.clone();
-            let mut owner = Association::new(None, &[Profile::AeadAes128Gcm], move |_| {
-                let _ = &callback_marker;
-                true
-            })
+            let mut owner = Association::new(
+                None,
+                &[Profile::AeadAes128Gcm],
+                move |_| {
+                    let _ = &callback_marker;
+                    true
+                },
+                || {},
+            )
             .unwrap();
             owner.start(true).unwrap();
             assert_eq!(Arc::strong_count(&marker), 2);

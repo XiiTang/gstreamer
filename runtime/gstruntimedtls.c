@@ -13,6 +13,7 @@ struct GstRuntimeDtls
   GstDtlsAgent *agent;
   GstDtlsCertificate *certificate;
   GMutex mutex;
+  GstRuntimeNotify wake;
   GQueue output;
   GstRuntimeDtlsKeys keys;
   gboolean encoder, decoder, taken, started, failed;
@@ -57,6 +58,7 @@ fail (GstRuntimeDtls *self, const GError *error, GstRuntimeDtlsError fallback)
   fail_locked (self, error ? error->domain : gst_runtime_dtls_error_quark (),
                error ? error->code : fallback, error ? error->message : fallback_message (fallback));
   g_mutex_unlock (&self->mutex);
+  gst_runtime_notify (&self->wake);
 }
 static void
 failure_callback (GstDtlsConnection *connection, const GError *error, gpointer data)
@@ -79,6 +81,7 @@ send_packet (GstDtlsConnection *connection, gconstpointer data, gsize length, gp
       fail_locked (self, gst_runtime_dtls_error_quark (), code, fallback_message (code));
     }
   g_mutex_unlock (&self->mutex);
+  gst_runtime_notify (&self->wake);
   return accepted;
 }
 
@@ -110,6 +113,7 @@ save_key (GstRuntimeDtls *self, gboolean sending, gconstpointer key, guint lengt
         self->decoder = TRUE;
     }
   g_mutex_unlock (&self->mutex);
+  gst_runtime_notify (&self->wake);
 }
 static void
 encoder_key (GstDtlsConnection *connection, gconstpointer key, guint length, guint cipher,
@@ -126,17 +130,17 @@ decoder_key (GstDtlsConnection *connection, gconstpointer key, guint length, gui
 
 int
 gst_runtime_dtls_create (const gchar *pem, const gchar *profiles, GstDtlsVerifyChain verify,
-                         gpointer data, GstRuntimeDtls **out)
+                         gpointer data, GstRuntimeNotify wake, GstRuntimeDtls **out)
 {
-  if (!out || !profiles || !verify)
-    return -2;
+  if (!out || !profiles || !verify || !wake.notify)
+    { gst_runtime_notify_clear (&wake); return -2; }
   *out = NULL;
   /* Validate the supplied identity before constructors that use GLib assertions. */
   if (pem)
     {
       gsize length = strlen (pem);
       if (!length || length > 1024 * 1024)
-        return -2;
+        { gst_runtime_notify_clear (&wake); return -2; }
       BIO *bio = BIO_new_mem_buf (pem, length);
       X509 *cert = bio ? PEM_read_bio_X509 (bio, NULL, NULL, NULL) : NULL;
       BIO_free (bio);
@@ -147,9 +151,10 @@ gst_runtime_dtls_create (const gchar *pem, const gchar *profiles, GstDtlsVerifyC
       X509_free (cert);
       BIO_free (bio);
       if (!valid)
-        return -2;
+        { gst_runtime_notify_clear (&wake); return -2; }
     }
   GstRuntimeDtls *self = g_new0 (GstRuntimeDtls, 1);
+  self->wake = wake;
   g_mutex_init (&self->mutex);
   g_queue_init (&self->output);
   /* Avoid a transient GValue-owned, non-cleansed copy of the private PEM. */
@@ -269,7 +274,7 @@ gst_runtime_dtls_input (GstRuntimeDtls *self, guint8 *bytes, gsize length)
 int
 gst_runtime_dtls_output (GstRuntimeDtls *self, guint8 *bytes, gsize *length)
 {
-  if (!self || !bytes || !length)
+  if (!self || !length)
     return -2;
   g_mutex_lock (&self->mutex);
   GBytes *packet = g_queue_peek_head (&self->output);
@@ -280,7 +285,9 @@ gst_runtime_dtls_output (GstRuntimeDtls *self, guint8 *bytes, gsize *length)
     {
       gsize size;
       const guint8 *data = g_bytes_get_data (packet, &size);
-      if (*length < size)
+      if (!bytes)
+        { *length = size; result = 1; }
+      else if (*length < size)
         result = -2;
       else
         {
@@ -347,19 +354,22 @@ gst_runtime_dtls_quiesce (GstRuntimeDtls *self)
 {
   /* The existing callback fence, without freeing the first-failure slot.
    * Never join under the runtime mutex: a running callback may take it. */
-  if (self && self->connection)
-    gst_dtls_connection_stop_and_join (self->connection);
+  if (!self) return;
+  if (self->connection)
+    {
+      gst_dtls_connection_stop_and_join (self->connection);
+      g_signal_handlers_disconnect_by_data (self->connection, self);
+      gst_dtls_connection_set_send_callback (self->connection, NULL, NULL, NULL);
+    }
+  gst_runtime_notify_clear (&self->wake);
 }
 void
 gst_runtime_dtls_free (GstRuntimeDtls *self)
 {
   if (!self)
     return;
-  if (self->connection)
-    {
-      gst_dtls_connection_stop_and_join (self->connection);
-      g_object_unref (self->connection);
-    }
+  gst_runtime_dtls_quiesce (self);
+  g_clear_object (&self->connection);
   g_free (self->failure_message);
   g_clear_object (&self->agent);
   g_clear_object (&self->certificate);

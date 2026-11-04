@@ -1,3 +1,4 @@
+#include "test_notify.h"
 /* Native DTLS client against an independent OpenSSL DTLS server.
  * Synthetic keys stay in process and are never printed or written to disk. */
 #include "gstdtlsconnection.h"
@@ -119,7 +120,7 @@ exchange (ServerIdentity *server_certificate, const char *profile, const char *s
   BIO_get_mem_ptr (private_identity, &memory);
   gchar *pem = g_strndup (memory->data, memory->length);
   int created = gst_runtime_dtls_create (
-      identity ? pem : NULL, profile, install_verifier ? verify_peer : NULL, &client, &connection);
+      identity ? pem : NULL, profile, install_verifier ? verify_peer : NULL, &client, test_notify (), &connection);
   OPENSSL_cleanse (pem, strlen (pem));
   g_free (pem);
   OPENSSL_cleanse (memory->data, memory->length);

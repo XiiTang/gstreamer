@@ -1,7 +1,7 @@
 #ifndef GST_RUNTIME_DTLS_H
 #define GST_RUNTIME_DTLS_H
 #include "../subprojects/gst-plugins-bad/ext/dtls/gstdtlsconnection.h"
-#include <gst/gst.h>
+#include "gstruntimenotify.h"
 G_BEGIN_DECLS
 typedef struct GstRuntimeDtls GstRuntimeDtls;
 typedef struct
@@ -14,12 +14,14 @@ typedef struct
  * No shared agent cache, sockets, system trust, or implicit profile fallback. */
 GST_API int gst_runtime_dtls_create (const gchar *pem, const gchar *profiles,
                                      GstDtlsVerifyChain verify, gpointer data,
+                                     GstRuntimeNotify wake,
                                      GstRuntimeDtls **out);
 GST_API int gst_runtime_dtls_start (GstRuntimeDtls *, int client);
 GST_API int gst_runtime_dtls_input (GstRuntimeDtls *, guint8 *, gsize);
 /* 1 connected, 0 handshaking, negative failure/peer close. */
 GST_API int gst_runtime_dtls_status (GstRuntimeDtls *);
-/* 1 datagram, 0 empty; length is capacity on entry. Never removes on short buffer. */
+/* 1 datagram, 0 empty; NULL bytes queries head length without consuming.
+ * Otherwise length is capacity on entry. Never removes on short buffer. */
 GST_API int gst_runtime_dtls_output (GstRuntimeDtls *, guint8 *, gsize *length);
 /* Take once, only after completed and verified handshake. */
 GST_API int gst_runtime_dtls_take_keys (GstRuntimeDtls *, GstRuntimeDtlsKeys *);

@@ -228,7 +228,11 @@ unsafe extern "C" fn visit_statistic(raw: *const RawStatistic, user_data: *mut c
     0
 }
 unsafe extern "C" {
-    fn gst_runtime_rtp_session_new(settings: *const Settings, sink: *const RawSink) -> *mut c_void;
+    fn gst_runtime_rtp_session_new(
+        settings: *const Settings,
+        sink: *const RawSink,
+        wake: crate::notify::Notify,
+    ) -> *mut c_void;
     fn gst_runtime_rtp_session_try_write(
         session: *mut c_void,
         port: i32,
@@ -374,12 +378,16 @@ pub(crate) fn with_settings<T>(
     Ok(result)
 }
 impl Session {
-    pub fn new(c: Configuration<'_>, sink: Arc<dyn DiagnosticSink>) -> Result<Self, Error> {
+    pub fn new(
+        c: Configuration<'_>,
+        sink: Arc<dyn DiagnosticSink>,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self, Error> {
         crate::initialize();
         let sink = Box::new(sink);
         let raw_sink = raw_sink(&sink);
         let raw = with_settings(&c, |settings| unsafe {
-            gst_runtime_rtp_session_new(settings, &raw_sink)
+            gst_runtime_rtp_session_new(settings, &raw_sink, crate::notify::Notify::new(notify))
         })?;
         let raw = NonNull::new(raw).ok_or(Error(-5))?;
         Ok(Self {
@@ -619,7 +627,7 @@ mod tests {
             reorder_latency: Some(Duration::from_millis(200)),
             negotiated: None,
         };
-        let mut session = Session::new(config, rec.clone()).unwrap();
+        let mut session = Session::new(config, rec.clone(), || {}).unwrap();
         assert!(
             !session
                 .feedback(FeedbackRequest::PictureLoss { ssrc: 8 })
@@ -649,7 +657,8 @@ mod tests {
                     reports: None,
                     ..config
                 },
-                rec.clone()
+                rec.clone(),
+                || {}
             )
             .is_err()
         );
@@ -660,7 +669,8 @@ mod tests {
                     negotiated: None,
                     ..config
                 },
-                rec.clone()
+                rec.clone(),
+                || {}
             )
             .is_err()
         );
@@ -677,7 +687,8 @@ mod tests {
                     feedback: Some(&bad),
                     ..config
                 },
-                rec.clone()
+                rec.clone(),
+                || {}
             )
             .is_err()
         );
@@ -707,6 +718,7 @@ mod tests {
                 negotiated: None,
             },
             rec.clone(),
+            || {},
         )
         .unwrap();
         let packet = [128, 96, 0, 1, 0, 0, 0, 1, 0, 0, 0, 7, 9];

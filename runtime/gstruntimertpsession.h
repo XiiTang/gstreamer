@@ -1,7 +1,7 @@
 #ifndef GST_RUNTIME_RTP_SESSION_H
 #define GST_RUNTIME_RTP_SESSION_H
 #include "gstruntimepayloadapi.h"
-#include <gst/gst.h>
+#include "gstruntimenotify.h"
 G_BEGIN_DECLS
 typedef struct _GstRuntimeRtpSession GstRuntimeRtpSession;
 typedef struct
@@ -31,7 +31,8 @@ typedef struct {
   gpointer data;
 } GstRuntimeDiagnosticSink;
 GST_API GstRuntimeRtpSession *gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings,
-                                                          const GstRuntimeDiagnosticSink *sink);
+                                                          const GstRuntimeDiagnosticSink *sink,
+                                                          GstRuntimeNotify wake);
 /* Input ports: 0 outbound RTP, 1 inbound RTP, 2 inbound RTCP. */
 GST_API
 int gst_runtime_rtp_session_write (GstRuntimeRtpSession *session, int port, const guint8 *data,

@@ -12,6 +12,9 @@ struct _GstRuntimeRtpSession
 {
   GstElement *pipeline, *rtp, *source[3], *sink[3];
   GstRuntimeDiagnosticSink diagnostic_sink;
+  GstRuntimeNotify wake;
+  GQueue errors;
+  guint callbacks;
   GObject *engine;
   GstElement *encoder, *decoder, *jitter, *rtx_send, *rtx_receive;
   GstRuntimeRtxSettings rtx;
@@ -31,6 +34,7 @@ static void (*test_before_playing) (GstElement *pipeline);
 static void (*test_handler_entered) (GstMessage *message);
 static void (*test_release_waiting) (void);
 static void (*test_stop_completed) (void);
+static void (*test_need_data) (GstAppSrc *source);
 #endif
 /* Every consumer holds stop_mutex and offers before releasing the message. */
 static void
@@ -107,15 +111,41 @@ link_output (GstRuntimeRtpSession *s, int port, const gchar *name, gboolean requ
     gst_object_unref (output);
   return ok;
 }
+static GstBusSyncReply retain_error (GstBus *, GstMessage *, gpointer);
+static void stop_handler_released (gpointer);
+static GstFlowReturn new_sample (GstAppSink *sink, gpointer data)
+{ gst_runtime_notify (&((GstRuntimeRtpSession *)data)->wake); return GST_FLOW_OK; }
+static void eos (GstAppSink *sink, gpointer data)
+{ gst_runtime_notify (&((GstRuntimeRtpSession *)data)->wake); }
+static void need_data (GstAppSrc *source, guint length, gpointer data)
+{
+#ifdef GST_RUNTIME_RTP_TEST_HOOKS
+  if (test_need_data) test_need_data (source);
+#endif
+  gst_runtime_notify (&((GstRuntimeRtpSession *)data)->wake);
+}
+static void callback_released (gpointer data)
+{
+  GstRuntimeRtpSession *s = data;
+  g_mutex_lock (&s->stop_mutex);
+  g_assert (s->callbacks > 0);
+  s->callbacks--;
+  g_cond_broadcast (&s->stop_done);
+  g_mutex_unlock (&s->stop_mutex);
+}
+/* Install before PLAYING; callback-table destroy notifications fence in-flight
+ * streaming calls, including when NULL fails. Never join under stop_mutex. */
+static void watch_bus (GstRuntimeRtpSession *s)
+{ gst_bus_set_sync_handler (s->bus, retain_error, s, stop_handler_released); }
 GstRuntimeRtpSession *
 gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings,
-                             const GstRuntimeDiagnosticSink *sink)
+                             const GstRuntimeDiagnosticSink *sink, GstRuntimeNotify wake)
 {
-  if (!sink || !sink->offer || !settings || settings->payload_type > 127 || !settings->clock_rate
+  if (!wake.notify || !sink || !sink->offer || !settings || settings->payload_type > 127 || !settings->clock_rate
       || settings->clock_rate > G_MAXINT || settings->bandwidth_bps < 0)
-    return NULL;
+    { gst_runtime_notify_clear (&wake); return NULL; }
   if (settings->feedback > 7 || (settings->feedback && !settings->reports))
-    return NULL;
+    { gst_runtime_notify_clear (&wake); return NULL; }
   if (settings->rtx
       && (!(settings->feedback & 1) || !settings->reorder || settings->rtx->payload_type > 127
           || settings->rtx->payload_type == settings->payload_type
@@ -125,9 +155,11 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings,
           || settings->rtx->peer_rtx_ssrc == settings->rtx->ssrc
           || settings->rtx->peer_ssrc == settings->rtx->peer_rtx_ssrc
           || !settings->rtx->cache_packets || settings->rtx->cache_packets > G_MAXINT16))
-    return NULL;
+    { gst_runtime_notify_clear (&wake); return NULL; }
   GstRuntimeRtpSession *s = g_new0 (GstRuntimeRtpSession, 1);
   s->diagnostic_sink = *sink;
+  s->wake = wake;
+  g_queue_init (&s->errors);
   g_mutex_init (&s->stop_mutex);
   g_cond_init (&s->stop_done);
   s->stop_outcome.state_change = GST_STATE_CHANGE_SUCCESS;
@@ -150,6 +182,7 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings,
     goto failed;
   gst_bin_add (GST_BIN (s->pipeline), s->rtp);
   s->bus = gst_element_get_bus (s->pipeline);
+  watch_bus (s);
   g_object_get (s->rtp, "internal-session", &s->engine, NULL);
   if (!s->engine)
     goto failed;
@@ -255,10 +288,15 @@ gst_runtime_rtp_session_new (const GstRuntimeRtpSettings *settings,
                                                     : pt_map (NULL, settings->payload_type, s));
       g_object_set (s->source[i], "caps", caps, "format", GST_FORMAT_TIME, "is-live", TRUE,
                     "do-timestamp", TRUE, "block", FALSE, "max-buffers", (guint64)32, "max-bytes",
-                    (guint64)(32 * 65536), "max-time", (guint64)0, NULL);
+                    (guint64)(32 * 65536), "max-time", (guint64)0, "min-percent", 100u, NULL);
       gst_caps_unref (caps);
       g_object_set (s->sink[i], "sync", FALSE, "async", FALSE, "max-buffers", 32u, "drop", FALSE,
                     "wait-on-eos", FALSE, "enable-last-sample", FALSE, NULL);
+      GstAppSrcCallbacks source_callbacks = { .need_data = need_data };
+      GstAppSinkCallbacks sink_callbacks = { .eos = eos, .new_sample = new_sample };
+      s->callbacks += 2;
+      gst_app_src_set_callbacks (GST_APP_SRC (s->source[i]), &source_callbacks, s, callback_released);
+      gst_app_sink_set_callbacks (GST_APP_SINK (s->sink[i]), &sink_callbacks, s, callback_released);
     }
   if (settings->negotiated_caps)
     gst_app_sink_set_caps (GST_APP_SINK (s->sink[0]), settings->negotiated_caps);
@@ -434,7 +472,7 @@ gst_runtime_rtp_session_pull (GstRuntimeRtpSession *s, int port, guint64 timeout
           g_mutex_unlock (&s->stop_mutex);
           return GST_FLOW_FLUSHING;
         }
-      error = gst_bus_pop_filtered (s->bus, GST_MESSAGE_ERROR);
+      error = g_queue_pop_head (&s->errors);
       if (error)
         offer_error (s, error);
       g_mutex_unlock (&s->stop_mutex);
@@ -613,7 +651,7 @@ gst_runtime_rtp_session_statistics (GstRuntimeRtpSession *s, GstRuntimeStatistic
   return result;
 }
 static GstBusSyncReply
-retain_stop_error (GstBus *bus, GstMessage *message, gpointer data)
+retain_error (GstBus *bus, GstMessage *message, gpointer data)
 {
   GstRuntimeRtpSession *s = data;
   if (GST_MESSAGE_TYPE (message) != GST_MESSAGE_ERROR)
@@ -623,17 +661,18 @@ retain_stop_error (GstBus *bus, GstMessage *message, gpointer data)
     test_handler_entered (message);
 #endif
   g_mutex_lock (&s->stop_mutex);
-  GstMessage *queued;
-  while ((queued = gst_bus_pop_filtered (bus, GST_MESSAGE_ERROR)))
+  if (g_atomic_int_get (&s->stopped))
     {
       s->stop_outcome.bus_errors++;
-      offer_error (s, queued);
-      gst_message_unref (queued);
+      offer_error (s, message);
+      gst_message_unref (message);
     }
-  s->stop_outcome.bus_errors++;
-  offer_error (s, message);
+  else
+    g_queue_push_tail (&s->errors, message);
   g_mutex_unlock (&s->stop_mutex);
-  gst_message_unref (message);
+  /* The predicate is committed before the wake; PASS would enqueue only
+   * after this callback returned and could lose the only notification. */
+  gst_runtime_notify (&s->wake);
   return GST_BUS_DROP;
 }
 static void
@@ -661,19 +700,16 @@ gst_runtime_rtp_session_stop (GstRuntimeRtpSession *s)
       /* READY -> NULL otherwise discards the queued errors before the owner
        * can read them. The private pipeline is never restarted after stop. */
       gst_pipeline_set_auto_flush_bus (GST_PIPELINE (s->pipeline), FALSE);
-      if (s->bus)
+      GstMessage *message;
+      while ((message = g_queue_pop_head (&s->errors)))
         {
-          GstMessage *message;
-          while ((message = gst_bus_pop_filtered (s->bus, GST_MESSAGE_ERROR)))
-            {
-              s->stop_outcome.bus_errors++;
-              offer_error (s, message);
-              gst_message_unref (message);
-            }
-          gst_bus_set_sync_handler (s->bus, retain_stop_error, s, stop_handler_released);
+          s->stop_outcome.bus_errors++;
+          offer_error (s, message);
+          gst_message_unref (message);
         }
     }
   g_mutex_unlock (&s->stop_mutex);
+  gst_runtime_notify (&s->wake);
   if (s->pipeline)
     {
       if (s->rtx_send)
@@ -682,10 +718,16 @@ gst_runtime_rtp_session_stop (GstRuntimeRtpSession *s)
     }
   if (s->bus)
     gst_bus_set_sync_handler (s->bus, NULL, NULL, NULL);
+  for (int i = 0; i < 3; i++)
+    {
+      GstAppSrcCallbacks source_callbacks = {0};
+      GstAppSinkCallbacks sink_callbacks = {0};
+      if (s->source[i]) gst_app_src_set_callbacks (GST_APP_SRC (s->source[i]), &source_callbacks, NULL, NULL);
+      if (s->sink[i]) gst_app_sink_set_callbacks (GST_APP_SINK (s->sink[i]), &sink_callbacks, NULL, NULL);
+    }
   g_mutex_lock (&s->stop_mutex);
   if (s->bus)
     {
-      GstMessage *message;
       /* GStreamer's sync handler owns references across in-flight posts.
        * Its destroy notification means every captured error has been read. */
       while (!s->stop_handler_released)
@@ -696,13 +738,12 @@ gst_runtime_rtp_session_stop (GstRuntimeRtpSession *s)
 #endif
           g_cond_wait (&s->stop_done, &s->stop_mutex);
         }
-      while ((message = gst_bus_pop_filtered (s->bus, GST_MESSAGE_ERROR)))
-        {
-          s->stop_outcome.bus_errors++;
-          offer_error (s, message);
-          gst_message_unref (message);
-        }
+
     }
+  while (s->callbacks)
+    g_cond_wait (&s->stop_done, &s->stop_mutex);
+  /* All callback tables and the bus handler have released their references. */
+  gst_runtime_notify_clear (&s->wake);
   s->stop_complete = TRUE;
 #ifdef GST_RUNTIME_RTP_TEST_HOOKS
   if (test_stop_completed)

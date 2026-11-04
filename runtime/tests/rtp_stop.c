@@ -1,3 +1,4 @@
+#include "test_notify.h"
 /* Native stop checkpoint and a test-only fixture for the safe Rust owner. */
 #ifdef RTP_STOP_FIXTURE
 #include <gst/gst.h>
@@ -79,6 +80,8 @@ test_rtp_stop_new (gboolean failure, guint queued, guint during, const GstRuntim
   gst_init (NULL, NULL);
   GstRuntimeRtpSession *s = g_new0 (GstRuntimeRtpSession, 1);
   s->diagnostic_sink = *sink;
+  s->wake = test_notify ();
+  g_queue_init (&s->errors);
   g_mutex_init (&s->stop_mutex);
   g_cond_init (&s->stop_done);
   for (guint i = 0; i < 3; i++)
@@ -86,6 +89,7 @@ test_rtp_stop_new (gboolean failure, guint queued, guint during, const GstRuntim
   s->stop_outcome.state_change = GST_STATE_CHANGE_SUCCESS;
   s->pipeline = gst_pipeline_new (NULL);
   s->bus = gst_element_get_bus (s->pipeline);
+  watch_bus (s);
   StopElement *child = g_object_new (stop_element_get_type (), NULL);
   child->fail = failure;
   child->errors = during;
@@ -123,7 +127,7 @@ G_MODULE_EXPORT GstRuntimeRtpSession *test_rtp_failing_new (const GstRuntimeDiag
 {
   GstRuntimeRtpSettings settings = { .ssrc = 7, .payload_type = 8, .clock_rate = 8000 };
   test_before_playing = fail_before_playing;
-  GstRuntimeRtpSession *s = gst_runtime_rtp_session_new (&settings, sink);
+  GstRuntimeRtpSession *s = gst_runtime_rtp_session_new (&settings, sink, test_notify ());
   test_before_playing = NULL;
   return s;
 }
@@ -148,9 +152,10 @@ static gpointer post_decode (gpointer data)
   g_error_free (error);
   return NULL;
 }
-static void hold_first (GstBus *bus, GstMessage *message, gpointer data)
+static Gate *first_post;
+static void hold_first (GstMessage *message)
 {
-  Gate *g = data;
+  Gate *g = first_post;
   g_mutex_lock (&g->lock);
   gboolean first = !g->reached;
   g_mutex_unlock (&g->lock);
@@ -161,12 +166,12 @@ static void delayed_poster_is_first (void)
   TestSink facts = {0}; GstRuntimeDiagnosticSink sink = test_sink (&facts);
   GstRuntimeRtpSession *s = test_rtp_stop_new (FALSE, 0, 1, &sink);
   Gate posted = {0}, in_null = {0}; child_of (s)->null_gate = &in_null;
-  gst_bus_enable_sync_message_emission (s->bus);
-  g_signal_connect (s->bus, "sync-message::error", G_CALLBACK (hold_first), &posted);
+  first_post = &posted; test_handler_entered = hold_first;
   GThread *p = g_thread_new ("delayed-post", post_decode, s); gate_wait (&posted);
   GThread *stop = g_thread_new ("stop", stop_thread, s); gate_wait (&in_null);
   gate_release (&posted); g_thread_join (p);
   gate_release (&in_null); g_thread_join (stop);
+  test_handler_entered = NULL; first_post = NULL;
   GstRuntimeRtpStopOutcome outcome;
   g_assert_cmpint (gst_runtime_rtp_session_close (s, &outcome), ==, 0);
   g_assert_cmpint (facts.first_code, ==, GST_STREAM_ERROR_DECODE);

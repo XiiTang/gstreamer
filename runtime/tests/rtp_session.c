@@ -1,3 +1,4 @@
+#include "test_notify.h"
 #include "test_sink.h"
 #include "gstruntimertpsession.h"
 #include <gst/rtp/gstrtcpbuffer.h>
@@ -97,9 +98,9 @@ main (int argc, char **argv)
   settings.bandwidth_bps = 128000;
   TestSink as = {0}, bs = {0};
   GstRuntimeDiagnosticSink a_sink = test_sink (&as), b_sink = test_sink (&bs);
-  GstRuntimeRtpSession *a = gst_runtime_rtp_session_new (&settings, &a_sink);
+  GstRuntimeRtpSession *a = gst_runtime_rtp_session_new (&settings, &a_sink, test_notify ());
   settings.ssrc = 8;
-  GstRuntimeRtpSession *b = gst_runtime_rtp_session_new (&settings, &b_sink);
+  GstRuntimeRtpSession *b = gst_runtime_rtp_session_new (&settings, &b_sink, test_notify ());
   g_assert_nonnull (a);
   g_assert_nonnull (b);
   guint8 original[sizeof (rtp)], buffer[65536];
@@ -186,7 +187,7 @@ main (int argc, char **argv)
   settings.ssrc = 7;
   settings.reports = FALSE;
   settings.feedback = 0;
-  a = gst_runtime_rtp_session_new (&settings, &a_sink);
+  a = gst_runtime_rtp_session_new (&settings, &a_sink, test_notify ());
   g_assert_nonnull (a);
   g_assert_false (gst_runtime_rtp_session_report (a, GST_SECOND));
   GThread *thread = g_thread_new ("blocked-rtp-writer", blocked_writer, a);
@@ -205,7 +206,7 @@ main (int argc, char **argv)
   ordered.latency_ms = 500;
   TestSink os = { 0 };
   GstRuntimeDiagnosticSink o_sink = test_sink (&os);
-  GstRuntimeRtpSession *o = gst_runtime_rtp_session_new (&ordered, &o_sink);
+  GstRuntimeRtpSession *o = gst_runtime_rtp_session_new (&ordered, &o_sink, test_notify ());
   g_assert_nonnull (o);
   for (int i = 0; i < 3; i++)
     {

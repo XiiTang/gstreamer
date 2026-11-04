@@ -112,6 +112,7 @@ fn selected_description_owns_caps_and_enforces_the_negotiated_track() {
             ..config
         },
         rec.clone(),
+        || {},
     )
     .unwrap();
     drop(selected);

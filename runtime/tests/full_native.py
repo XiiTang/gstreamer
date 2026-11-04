@@ -4,7 +4,7 @@ p=argparse.ArgumentParser();p.add_argument('--build',type=pathlib.Path,required=
 a=p.parse_args();root=pathlib.Path(__file__).resolve().parents[2];a.output.mkdir(parents=True,exist_ok=True)
 env=dict(os.environ,PKG_CONFIG_PATH=str(a.build/'meson-uninstalled'))
 def flags(*args):return shlex.split(subprocess.check_output(['pkg-config',*args,'gstreamer-full-1.0','gio-2.0','openssl'],env=env,text=True))
-for name in ['depay_extensions','rtsp_transport','payload','rtp_session','dtls_owner','rtp_feedback','sdp_selection']:
+for name in ['depay_extensions','rtsp_transport','payload','rtp_session','dtls_owner','rtp_feedback','sdp_selection','rtp_wake']:
  subprocess.run(['cc','-std=c11','-g','-I'+str(root/'runtime'),'-I'+str(root/'subprojects/gst-plugins-bad/ext/dtls'),'-I'+str(root/'subprojects/gst-plugins-base/gst-libs/gst/rtsp'),*flags('--cflags'),str(root/'runtime/tests'/f'{name}.c'),*flags('--libs'),'-Wl,-rpath,'+str(a.build.resolve()),'-o',str(a.output/name)],check=True)
 registry=a.output/'must-not-create-registry.bin'
 env.update(GST_PLUGIN_PATH_1_0='/nonexistent/forbidden',GST_PLUGIN_SYSTEM_PATH_1_0='/nonexistent/forbidden',GST_REGISTRY_1_0=str(registry),GST_DEBUG='9')
@@ -13,6 +13,7 @@ subprocess.run([str(a.output/'sdp_selection')],env=env,check=True)
 subprocess.run([str(a.output/'rtp_feedback')],env=env,check=True)
 subprocess.run([str(a.output/'dtls_owner')],env=env,check=True)
 subprocess.run([str(a.output/'rtsp_transport')],env=env,check=True)
+subprocess.run([str(a.output/'rtp_wake')],env=env,check=True)
 subprocess.run([str(a.output/'rtp_session')],env=env,check=True)
 subprocess.run([str(a.output/'rtp_session'),'periodic'],env=env,check=True)
 common=['ffmpeg','-v','error','-y','-f','lavfi','-i','color=c=black:s=64x64:r=1','-frames:v','1','-an']

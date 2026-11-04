@@ -1,5 +1,55 @@
 # Boundless patches
 
+## Runtime native readiness (#42)
+
+The Boundless-written `runtime/` now owns one construction-time
+`GstRuntimeNotify` per DTLS association or RTP session. It transfers callback,
+data and destroy ownership even on failed construction. Notifications run on
+DTLS caller/timeout threads and RTP streaming/message-posting/stop threads;
+they must not block, panic or re-enter native state. Rust closures carry only
+caller-owned readiness, with no Tokio dependency here. Read predicates before
+waiting and retain a permit: notifications coalesce and may precede the wait.
+DTLS output supports a non-consuming NULL-buffer length query, so the safe
+owner allocates nothing for an empty queue and exactly the known packet length
+otherwise. Failure precedence and non-consuming short-buffer refusal remain.
+
+Upstream comparison (GStreamer 1.28.7): appsink invokes sample/EOS callbacks
+with its committed queue state and holds a callback-table reference during
+calls; appsrc invokes need-data after removal and likewise retains callback
+data. We use these unchanged, with min-percent=100 for both packet and encoded
+byte admission. gstreamer-rs AppSinkStream/AppSrcSink use these same readiness
+points. Native DTLS already owns single-shot GstClock retransmission and its
+timeout pool; start/input/BIO re-arm it. This patch leaves that scheduling,
+upstream flow results, queue capacities, EOS and stop-without-BYE unchanged.
+The fork's existing DTLS stop_and_join fence is retained before disconnecting
+key/send hooks and destroying registration data. Key wakes cover CONNECTED:
+state is published under the same connection lock; no additional property hook.
+
+Upstream GstBus calls its sync handler before enqueueing PASS messages. A wake
+there alone can precede an observable error. The runtime therefore retains
+ERROR messages in its existing stop-mutex domain before waking and returns
+DROP, owning each message until the active reader or stop offers and releases
+it once. The same lifetime handler counts/offers errors during NULL. Upstream
+NULL normally flushes the bus; the runtime continues disabling that flush to
+retain cleanup failures. Stop detaches the handler and all six app callbacks,
+waits for their destroy notifications (including failed construction/NULL),
+then destroys registration data before native objects. Replacement alone would
+not fence in-flight callbacks. No upstream source, timeout, recovery or retry
+policy is changed; the C fixture-only blocking writer keeps its existing wait.
+
+Regression: `tests/rtp_wake.c` drives real sample/EOS, packet/encoded-byte
+capacity, active bus failure and pending-wake stop; `tests/dtls_timeout.c`
+retains timer-failure/fence coverage and tests query/short-buffer and registration
+destruction. `rust::dtls::tests::empty_output_allocates_nothing_and_a_stored_wake_delivers_the_exact_flight`
+counts the output allocation checkpoint and checks a real flight. The full
+native payload/session suite, joined-stop suite and safe Rust runtime suite
+remain required against this commit's artifact. Boundless's production idle
+worker/handshake regressions count native entries under a driven Tokio clock
+and then observe actual delivery; independent peers check native retransmission.
+Results are recorded per revision/platform by the caller; this record does not
+claim unrun platforms or distribution acceptance.
+
+
 The `boundless` branch carries these patches on GStreamer 1.28.7. Each is
 required by Boundless's native media runtime (`runtime/`): media engines and
 their state owned by an Execution, on connections and keys Boundless supplies.
