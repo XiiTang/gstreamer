@@ -171,6 +171,7 @@ struct _GstRTSPConnection
   GstRTSPBuilder *runtime_builder;
   GstRTSPMessage *runtime_message;
   GstRTSPSerializedMessage *runtime_writer;
+  gpointer (*runtime_body_allocator) (gsize size);
   GSocketClient *client;
   GIOStream *stream0;
   GIOStream *stream1;
@@ -516,6 +517,14 @@ gst_rtsp_connection_next_cseq (const GstRTSPConnection *conn)
 {
   g_return_val_if_fail (conn && conn->runtime_io, 0);
   return conn->cseq <= G_MAXINT32 ? (guint32) conn->cseq : 0;
+}
+
+void
+gst_rtsp_connection_set_runtime_body_allocator (GstRTSPConnection *conn,
+    gpointer (*allocate) (gsize size))
+{
+  g_return_if_fail (conn && conn->runtime_io);
+  conn->runtime_body_allocator = allocate;
 }
 
 static gboolean
@@ -2913,11 +2922,15 @@ build_next (GstRTSPBuilder * builder, GstRTSPMessage * message,
               goto invalid_body_len;
             }
             builder->body_len = content_length_parsed;
-            builder->body_data = g_try_malloc (builder->body_len + 1);
+            builder->body_data = conn->runtime_body_allocator
+                ? conn->runtime_body_allocator (builder->body_len + 1)
+                : g_try_malloc (builder->body_len + 1);
             /* we can't do much here, we need the length to know how many bytes
-             * we need to read next and when allocation fails, we can't read the payload. */
+             * we need to read next and when allocation fails, we can't read the payload.
+             * A runtime reader tells this from a body past its limit. */
             if (builder->body_data == NULL) {
-              res = GST_RTSP_ENOMEM;
+              res = conn->runtime_io
+                  ? (GstRTSPResult) GST_RTSP_RUNTIME_HOST_MEMORY : GST_RTSP_ENOMEM;
               goto invalid_body_len;
             }
 

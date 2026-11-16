@@ -86,6 +86,17 @@ gsize gst_rtsp_connection_written_bytes (const GstRTSPConnection *conn);
 GST_RTSP_API
 guint32 gst_rtsp_connection_next_cseq (const GstRTSPConnection *conn);
 
+/* Runtime supplied streams only: the result when a message body within the
+ * reader's limits cannot be allocated, so the host is out of memory.
+ * GST_RTSP_ENOMEM stays the answer for a message past those limits; upstream
+ * answers GST_RTSP_ENOMEM for both. */
+#define GST_RTSP_RUNTIME_HOST_MEMORY (-1002)
+/* Runtime tests only: the allocator a runtime reader uses for a message body,
+ * or NULL for g_try_malloc. */
+GST_RTSP_API
+void gst_rtsp_connection_set_runtime_body_allocator (GstRTSPConnection *conn,
+    gpointer (*allocate) (gsize size));
+
 GST_RTSP_API
 GstRTSPResult      gst_rtsp_connection_accept                 (GSocket * socket, GstRTSPConnection ** conn, GCancellable * cancellable);
 

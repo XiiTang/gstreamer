@@ -184,6 +184,7 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 | [H264/H265 dropped RTP extensions](runtime/README.md#h264h265-dropped-rtp-extensions-2026-10-02) | Upstream MR !12389, backported: a dropped FU or NAL clears its delayed header extensions | `runtime/tests/depay_extensions.c` in `runtime/tests/full_native.py` |
 | [RTP session end of input](#rtp-session-end-of-input-boundless-453) | A receive failure ends the session's input instead of abandoning it: what native already accepted (appsrc, `rtpsession`, jitterbuffer) still reaches the reader, and the reader learns when it has all of it | `runtime/tests/rtp_session.c` end-of-input drain in `runtime/tests/full_native.py`; Boundless `rtp::tests::relayed_packets_precede_the_relays_broken_datagram` |
 | Rename project integration to Boundless | The runtime crate and build name the project | Builds |
+| [RTSP body allocation failure](#rtsp-body-allocation-failure-boundless-batch-d-f7) | A runtime reader answers a body within its limits that cannot be allocated as `GST_RTSP_RUNTIME_HOST_MEMORY`, so it is told from a message past the limits (`GST_RTSP_ENOMEM`) | `runtime/tests/rtsp_transport.c` `limits_and_memory` |
 
 ## DTLS timeout failure (issue #63, batch 4)
 
@@ -483,3 +484,39 @@ ended, ends the input, reads the three in order, and then sees the output end.
 With `end_input` reduced to a no-op the test fails (exit 134: the output never
 ends within 5 s); with the patch it passes (exit 0) in
 `runtime/tests/full_native.py` on macOS arm64.
+
+## RTSP body allocation failure (Boundless batch D, F7)
+
+The runtime reader answers `GST_RTSP_ENOMEM` (-4) from three places in
+`build_next`: a `Content-Length` past `content_length_limit` (the read limit
+Boundless gives `gst_rtsp_connection_create_runtime_client`), received bytes
+past `capture_limit` (that limit plus 64 KiB), and a failed `g_try_malloc` of a
+body within the limit. Boundless answers the first two as the message limit
+the program can raise. The third means the host is out of memory, where
+raising the limit is the wrong next step, so the reader has to tell it apart.
+
+Under `conn->runtime_io` only, a failed body allocation now answers
+`GST_RTSP_RUNTIME_HOST_MEMORY` (-1002, defined beside the runtime reader's
+API in `gstrtspconnection.h`; Rust `boundless_media::Error::HOST_MEMORY`).
+Both limit branches keep `GST_RTSP_ENOMEM`. Upstream answers
+`GST_RTSP_ENOMEM` for the allocation failure and for its own
+`content_length_limit` (`build_next`'s body-length branch, unchanged here
+outside the runtime reader), and logs "could not allocate body" for both;
+non-runtime connections keep that.
+
+`gst_rtsp_connection_set_runtime_body_allocator` sets the allocator a
+runtime reader uses for a body (NULL keeps `g_try_malloc`). It exists only so
+the native test can make that allocation fail; a host cannot be starved
+reliably from a test.
+
+Regression: `runtime/tests/rtsp_transport.c` `limits_and_memory` reads a
+`Content-Length` past a 1024-byte limit (`GST_RTSP_ENOMEM`) and a body within
+it whose allocator returns NULL (`GST_RTSP_RUNTIME_HOST_MEMORY`). On macOS
+arm64, against this checkout's private gst-full build (`runtime/build_native.py`),
+it aborts (exit 134, `-4 == -1002`) with the allocation branch answering
+`GST_RTSP_ENOMEM` and passes (exit 0) with the patch, with the rest of
+`rtsp_transport` passing. `cargo test --manifest-path runtime/rust/Cargo.toml
+--locked -- --test-threads=2`, strict `cargo clippy --all-targets --locked --
+-D warnings` and `cargo fmt --check` exit 0 against that artifact. Boundless
+maps -1002 to `host_unavailable {facility: memory}` and -4 on receive to
+`limit_exceeded {message_bytes}` in `media::native`.

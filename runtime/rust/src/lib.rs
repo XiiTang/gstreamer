@@ -22,6 +22,10 @@ impl Error {
     pub const CANCELLED: Self = Self(-3);
     pub const EOF: Self = Self(-11);
     pub const TIMEOUT: Self = Self(-14);
+    /// A message within the reader's limits could not be allocated: the
+    /// host is out of memory (`GST_RTSP_RUNTIME_HOST_MEMORY`). A message past
+    /// those limits stays `-4`.
+    pub const HOST_MEMORY: Self = Self(-1002);
     pub(crate) fn check(code: i32) -> Result<(), Self> {
         if code == 0 { Ok(()) } else { Err(Self(code)) }
     }

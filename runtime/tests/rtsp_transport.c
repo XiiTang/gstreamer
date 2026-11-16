@@ -147,6 +147,33 @@ malformed (void)
       close (peer);
     }
 }
+static gpointer
+no_memory (gsize size)
+{
+  return NULL;
+}
+static void
+limits_and_memory (void)
+{
+  /* A body past the limit and one the host cannot allocate are told apart. */
+  const char past[] = "RTSP/1.0 200 OK\r\nCSeq: 0\r\nContent-Length: 1025\r\n\r\n";
+  const char within[] = "RTSP/1.0 200 OK\r\nCSeq: 0\r\nContent-Length: 8\r\n\r\n";
+  for (guint allocation = 0; allocation < 2; allocation++)
+    {
+      int peer;
+      GstRTSPConnection *conn = connection (&peer, 1024);
+      GstRTSPMessage message = { 0 };
+      if (allocation)
+        gst_rtsp_connection_set_runtime_body_allocator (conn, no_memory);
+      const char *reply = allocation ? within : past;
+      write (peer, reply, strlen (reply));
+      g_assert_cmpint (gst_rtsp_connection_receive_usec (conn, &message, 1000000), ==,
+                       allocation ? GST_RTSP_RUNTIME_HOST_MEMORY : GST_RTSP_ENOMEM);
+      gst_rtsp_message_unset (&message);
+      gst_rtsp_connection_free (conn);
+      close (peer);
+    }
+}
 static void
 operation (GstRTSPRuntimeClient *client, int peer, GstRTSPVersion version, GstRTSPMethod method,
            const char *uri, const char *session, guint sequence, guint code, const char *headers)
@@ -487,6 +514,7 @@ main (int argc, char **argv)
   incremental_duplex_write ();
   truncated_cancel ();
   malformed ();
+  limits_and_memory ();
   explicit_state (GST_RTSP_VERSION_1_0);
   explicit_state (GST_RTSP_VERSION_2_0);
   const gchar *invalid[] = {
