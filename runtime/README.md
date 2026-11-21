@@ -77,6 +77,12 @@ latency fallback. No production hook or serialized-query barrier is added.
 - `gst_dtls_connection_set_srtp_profiles` selects only the declared profiles,
   before the first handshake. Each connection permits one handshake. A new
   connection is required for a new security session.
+- The runtime's agent context sets `SSL_OP_NO_RENEGOTIATION`, so a peer's
+  renegotiation request is refused with a `no_renegotiation` alert. Keys are
+  exported once; a completed rehandshake would leave this side on the first
+  SRTP keys while the peer moves to new ones (RFC 5764 section 5.2). A peer may
+  end the association when refused; an OpenSSL peer does, with a fatal
+  `handshake_failure`, which reaches the runtime's first-failure slot.
 - `gst_dtls_connection_set_failure_callback` accepts one non-NULL callback only
   before start/stop, under the connection lock. It refuses replacement without
   touching the original callback or the caller's data. Each originating failure

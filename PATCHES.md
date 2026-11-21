@@ -173,7 +173,7 @@ their state owned by an Execution, on connections and keys Boundless supplies.
 | [SDP metadata expansion](#sdp-metadata-expansion-driver-plan-rule-20) | Remove b5bc00f5f8's aggregate quotas; the native parser has no aggregate caps-field or byte capacity | `runtime/rust/tests/sdp.rs` feedback expansion regressions, plus the retained independent FFmpeg fixture |
 | [Remove unused RTSP dispatch query](#unused-rtsp-dispatch-query-driver-plan-fork-audit) | Owner-approved removal of b6d8c35a9c; write admission and progress retain their returned `Dispatch` | Rust API and native export probes fail before removal and pass after; native RTSP transport and the whole Rust crate suite |
 | Rust lint prerequisite (issue #63) | Use the existing null-pointer idiom in RTSP message copying and the common `12 + tag` minimum in SRTP validation; behavior is unchanged | With the matching private `BOUNDLESS_MEDIA_PREFIX`, `cargo clippy --manifest-path runtime/rust/Cargo.toml --all-targets --locked -- -D warnings`: pinned base exits 101 for `cmp_null` and `if_same_then_else`; repaired source exits 0 on macOS arm64 |
-| [DTLS-SRTP](runtime/README.md#dtls-srtp) | Keys are exported only after a verified peer, for the declared profiles, from one handshake per connection, and are cleansed after use | `runtime/tests/dtls_interop.c` built by `runtime/tests/build_dtls.py`, against an independent OpenSSL DTLS server; `runtime/tests/dtls_owner.c` |
+| [DTLS-SRTP](runtime/README.md#dtls-srtp) | Keys are exported only after a verified peer, for the declared profiles, from one handshake per connection, and are cleansed after use; a peer's renegotiation request is refused ([DTLS renegotiation refused](#dtls-renegotiation-refused-boundless-915)) | `runtime/tests/dtls_interop.c` built by `runtime/tests/build_dtls.py`, against an independent OpenSSL DTLS server; `runtime/tests/dtls_owner.c`, including the refused renegotiation |
 | [Controlled RTSP and RTP payloads](runtime/README.md#controlled-rtsp-and-rtp-payloads) | The RTSP client and payload transforms run on a stream and frames Boundless supplies, with bounded queues and no resolving, redirects, retries or pipeline strings | `runtime/tests/full_native.py` with FFmpeg fixtures; `runtime/tests/rtsp_transport.c`; `runtime/rust/tests/rtsp.rs` and `payload.rs` |
 | [Private native build](runtime/README.md#controlled-rtsp-and-rtp-payloads) | `build_native.py` builds a private gst-full artifact with only the selected plugins, from hashed wraps, for macOS 13 and Windows | macOS and Windows builds; the deployment-target check rejects newer APIs |
 | [Shared RTP session and SRTP state](runtime/README.md#shared-rtp-session-and-srtp-state) | Direct RTP and RTSP tracks share one owned `rtpsession` with SRTP state, declared feedback and RTX, SDP selection checked natively and explicit keepalive cycles with the nonblocking supply in [RTSP credential generations](#rtsp-credential-generations) | `runtime/tests/rtp_session.c`, `rtp_feedback.c`, `sdp_selection.c`, `payload.c`; `runtime/rust/tests/sdp.rs` and `keepalive.rs` |
@@ -520,3 +520,45 @@ it aborts (exit 134, `-4 == -1002`) with the allocation branch answering
 -D warnings` and `cargo fmt --check` exit 0 against that artifact. Boundless
 maps -1002 to `host_unavailable {facility: memory}` and -4 on receive to
 `limit_exceeded {message_bytes}` in `media::native`.
+
+## DTLS renegotiation refused (Boundless #915)
+
+The runtime exports SRTP keys once per association: upstream
+`GstDtlsConnection::openssl_poll` exports only while `keys_exported` is unset
+(`subprojects/gst-plugins-bad/ext/dtls/gstdtlsconnection.c`; the same guard is
+in upstream GStreamer). Received DTLS records still pass through `SSL_read`, so
+an OpenSSL 3 client completes a rehandshake its server requests with
+HelloRequest. RFC 5764 section 5.2 then has the peer protect its SRTP with the
+new keys, while this side keeps the first set: the peer's media fails
+authentication and is dropped, with the association still open.
+
+`gst_runtime_dtls_create` sets `SSL_OP_NO_RENEGOTIATION` on the agent's
+`SSL_CTX` (`runtime/gstruntimedtls.c`), before the connection creates its `SSL`
+from that context. A HelloRequest is answered with a `no_renegotiation` warning
+alert. An OpenSSL server takes that as fatal and sends `handshake_failure`
+(`ssl/record/rec_layer_d1.c`), which ends the association through the existing
+first-failure path; a peer that tolerates the refusal keeps the first keys on
+both sides. The server role already refused client renegotiation (OpenSSL 3
+requires `SSL_OP_ALLOW_CLIENT_RENEGOTIATION`), so it is unchanged. No
+gst-plugins-bad file changes: upstream sets no renegotiation option and keeps
+its one-time export.
+
+Regression: `runtime/tests/dtls_owner.c` adds a renegotiation case per SRTP
+profile against an independent OpenSSL DTLS server. After the first export, the
+server sends HelloRequest with one handshake call and then drives its record
+reader (`SSL_read`), relaying datagrams. It asserts the server's actual
+refusal (`SSL_ERROR_SSL`, reason `SSL_R_NO_RENEGOTIATION`), relays the server's
+fatal alert, and asserts the runtime's failed status and retained failure. The
+case ends a baseline run only on an explicit second-handshake completion (a
+changed server Finished with the server out of init), compares the server's new
+exporter material with the runtime's first keys, and fails there.
+
+On macOS arm64, against this checkout's private gst-full build
+(`runtime/build_native.py`, OpenSSL 3.6.5) and the same `dtls_owner.c`: with
+the option removed (a local baseline build), the first profile's case observes
+the completed second handshake, finds the server's new SRTP exporter material
+different from the runtime's first keys and stops there (exit 133, "the client
+completed a peer-requested DTLS rehandshake"); with the option, all three
+profiles pass the refused-renegotiation case, and `runtime/tests/full_native.py`
+passes (exit 0).
+

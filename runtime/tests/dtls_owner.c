@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <openssl/crypto.h>
+#include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
@@ -80,7 +81,7 @@ finalized (gpointer data, GObject *object)
 static void
 exchange (ServerIdentity *server_certificate, const char *profile, const char *server_profile,
           guint key_length, guint salt_length, gboolean trust, gboolean install_verifier,
-          gboolean identity, guint8 *previous, gboolean close_notify)
+          gboolean identity, guint8 *previous, gboolean close_notify, gboolean renegotiate)
 {
   struct sockaddr_in client_address, server_address;
   Client client = { .root = server_certificate->root, .trust = trust };
@@ -229,6 +230,82 @@ exchange (ServerIdentity *server_certificate, const char *profile, const char *s
       g_assert_cmpint (gst_runtime_dtls_take_keys (connection, &keys), <, 0);
       const gchar *domain; gint code; gsize length;
       g_assert_cmpint (gst_runtime_dtls_failure (connection, &domain, &code, NULL, 0, &length), ==, 0);
+      if (renegotiate) {
+        /* The peer asks for a second handshake. One handshake call only
+         * sends HelloRequest and returns to the established state; the
+         * server's record reader is what consumes the client's answer. */
+        guint8 first_finished[EVP_MAX_MD_SIZE];
+        size_t first_length = SSL_get_finished (server, first_finished, sizeof (first_finished));
+        g_assert_cmpint (SSL_renegotiate (server), ==, 1);
+        g_assert_cmpint (SSL_do_handshake (server), ==, 1);
+        gboolean refused = FALSE, renewed = FALSE;
+        int input = 0;
+        gint64 limit = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+        while (!refused && !renewed && g_get_monotonic_time () < limit)
+          {
+            guint8 output[65535];
+            gsize output_length = sizeof (output);
+            while (gst_runtime_dtls_output (connection, output, &output_length) == 1)
+              {
+                g_assert_cmpint (send (client.socket, output, output_length, 0), ==, output_length);
+                output_length = sizeof (output);
+              }
+            guint8 datagram[65536];
+            ssize_t size;
+            while (input >= 0 && (size = recv (client.socket, datagram, sizeof (datagram), 0)) > 0)
+              input = gst_runtime_dtls_input (connection, datagram, size);
+            guint8 data[64];
+            ERR_clear_error ();
+            int read = SSL_read (server, data, sizeof (data));
+            /* The runtime sends no DTLS application data. */
+            g_assert_cmpint (read, <=, 0);
+            int code = SSL_get_error (server, read);
+            if (code == SSL_ERROR_SSL)
+              {
+                g_assert_cmpint (ERR_GET_REASON (ERR_peek_error ()), ==, SSL_R_NO_RENEGOTIATION);
+                refused = TRUE;
+              }
+            else
+              g_assert_true (code == SSL_ERROR_WANT_READ || code == SSL_ERROR_WANT_WRITE);
+            /* A second completed exchange changes the server's Finished and
+             * leaves it out of init; a read retry alone does not say so. */
+            guint8 finished[EVP_MAX_MD_SIZE];
+            size_t length = SSL_get_finished (server, finished, sizeof (finished));
+            renewed = !refused && SSL_is_init_finished (server)
+                      && (length != first_length || CRYPTO_memcmp (finished, first_finished, length));
+            struct pollfd fds[2] = { { client.socket, POLLIN, 0 }, { server_socket, POLLIN, 0 } };
+            poll (fds, 2, 2);
+          }
+        if (renewed)
+          {
+            /* Without the refusal the client completed a second exchange:
+             * the peer now uses new SRTP keys while the runtime keeps the
+             * first, one-shot set. That split is the defect this guards. */
+            guint8 renewed_keys[88];
+            const char label[] = "EXTRACTOR-dtls_srtp";
+            g_assert_cmpint (SSL_export_keying_material (server, renewed_keys, 2 * key_size, label,
+                                                         sizeof (label) - 1, NULL, 0, 0),
+                             ==, 1);
+            g_assert_cmpint (CRYPTO_memcmp (client.encoder, renewed_keys, key_length), !=, 0);
+            OPENSSL_cleanse (renewed_keys, sizeof (renewed_keys));
+            g_error ("the client completed a peer-requested DTLS rehandshake, leaving its SRTP "
+                     "keys stale");
+          }
+        g_assert_true (refused);
+        /* The OpenSSL peer turns the refusal into a fatal alert: relay it and
+         * observe the association's failed end. */
+        while (input >= 0)
+          {
+            struct pollfd fd = { client.socket, POLLIN, 0 };
+            g_assert_cmpint (poll (&fd, 1, 5000), ==, 1);
+            guint8 datagram[65536];
+            ssize_t size = recv (client.socket, datagram, sizeof (datagram), 0);
+            g_assert_cmpint (size, >, 0);
+            input = gst_runtime_dtls_input (connection, datagram, size);
+          }
+        g_assert_cmpint (gst_runtime_dtls_status (connection), <, 0);
+        g_assert_cmpint (gst_runtime_dtls_failure (connection, &domain, &code, NULL, 0, &length), ==, 1);
+      }
       if (close_notify) {
         g_assert_cmpint (SSL_shutdown (server), ==, 0);
         int result = 0;
@@ -333,21 +410,23 @@ main (int argc, char **argv)
       guint8 previous[45] = { 0 };
       for (guint repeat = 0; repeat < 2; repeat++)
         exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, TRUE,
-                  TRUE, previous, FALSE);
+                  TRUE, previous, FALSE, FALSE);
       exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], FALSE, TRUE,
-                TRUE, previous, FALSE);
+                TRUE, previous, FALSE, FALSE);
       exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, FALSE,
-                TRUE, previous, FALSE);
+                TRUE, previous, FALSE, FALSE);
       exchange (server, profiles[i], profiles[(i + 1) % 3], key_lengths[i], salt_lengths[i], TRUE,
-                TRUE, TRUE, previous, FALSE);
+                TRUE, TRUE, previous, FALSE, FALSE);
       exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, TRUE,
-                FALSE, previous, FALSE);
+                FALSE, previous, FALSE, FALSE);
       exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, TRUE,
-                TRUE, previous, TRUE);
+                TRUE, previous, TRUE, FALSE);
+      exchange (server, profiles[i], profiles[i], key_lengths[i], salt_lengths[i], TRUE, TRUE,
+                TRUE, previous, FALSE, TRUE);
       OPENSSL_cleanse (previous, sizeof (previous));
       g_print ("PASS opaque DTLS %s: independent exporter, verified mTLS chain, missing client "
                "identity rejection, fresh keys, rejected identity, missing "
-               "verifier, profile mismatch, one-shot keys, joined stop\n",
+               "verifier, profile mismatch, one-shot keys, joined stop, refused renegotiation\n",
                profiles[i]);
     }
   X509_free (server->certificate);

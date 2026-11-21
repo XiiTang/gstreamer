@@ -171,6 +171,12 @@ gst_runtime_dtls_create (const gchar *pem, const gchar *profiles, GstDtlsVerifyC
       || !SSL_CTX_check_private_key (ctx))
     goto invalid;
   SSL_CTX_set_verify_depth (ctx, 15);
+  /* One handshake per association: keys are exported once, so a completed
+   * peer-requested rehandshake would leave this side on the first SRTP keys
+   * while the peer moves to new ones (RFC 5764 section 5.2). Refuse it; a
+   * peer that ends the association then ends it visibly. Every SSL of this
+   * agent is created from this context after this point. */
+  SSL_CTX_set_options (ctx, SSL_OP_NO_RENEGOTIATION);
   /* Install the entire explicitly supplied chain on this unique agent only. */
   if (pem)
     {
